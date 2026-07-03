@@ -123,18 +123,45 @@ final class MainViewModel {
 
     // MARK: - Lazy artwork
 
+    /// Decode + downsample OFF the main thread. Apple Music covers arrive at up
+    /// to ~3000px; a bare NSImage(data:) defers PNG decompression to first draw
+    /// ON the main thread (profiled as scroll/hover jank). CGImageSource
+    /// thumbnailing decodes once, small, in the background.
+    nonisolated private static func decodedThumbnail(from data: Data, maxPixel: Int) -> CGImage? {
+        let options: [CFString: Any] = [kCGImageSourceShouldCache: false]
+        guard let source = CGImageSourceCreateWithData(data as CFData, options as CFDictionary) else {
+            return nil
+        }
+        let thumbOptions: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixel,
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, thumbOptions as CFDictionary)
+    }
+
     func loadArtwork(for playlist: MusicPlaylist) {
         let id = playlist.id
         guard artwork[id] == nil, !artworkInFlight.contains(id) else { return }
         artworkInFlight.insert(id)
         music.fetchArtwork(forPlaylist: id) { [weak self] data in
-            Task { @MainActor in
-                guard let self else { return }
-                self.artworkInFlight.remove(id)
-                guard let data, let image = NSImage(data: data) else { return }
-                self.artwork[id] = image
-                if let rgb = ArtworkColor.dominant(from: data) {
-                    self.dominant[id] = Color(.sRGB, red: rgb.red, green: rgb.green, blue: rgb.blue)
+            guard let data else {
+                Task { @MainActor in self?.artworkInFlight.remove(id) }
+                return
+            }
+            Task.detached(priority: .utility) {
+                let cg = Self.decodedThumbnail(from: data, maxPixel: 640)
+                let rgb = ArtworkColor.dominant(from: data)
+                await MainActor.run {
+                    guard let self else { return }
+                    self.artworkInFlight.remove(id)
+                    if let cg {
+                        self.artwork[id] = NSImage(cgImage: cg, size: .zero)
+                    }
+                    if let rgb {
+                        self.dominant[id] = Color(.sRGB, red: rgb.red, green: rgb.green, blue: rgb.blue)
+                    }
                 }
             }
         }
@@ -151,14 +178,25 @@ final class MainViewModel {
               !trackArtworkInFlight.contains(id) else { return }
         trackArtworkInFlight.insert(id)
         music.fetchArtwork(forTrack: id, inPlaylist: playlistID) { [weak self] data in
-            Task { @MainActor in
-                guard let self else { return }
-                self.trackArtworkInFlight.remove(id)
-                guard let data, let image = NSImage(data: data) else { return }
-                self.trackArtworkCache.setObject(image, forKey: id as NSString)
-                self.trackArtworkVersion &+= 1
-                if let rgb = ArtworkColor.dominant(from: data) {
-                    self.trackDominant[id] = Color(.sRGB, red: rgb.red, green: rgb.green, blue: rgb.blue)
+            guard let data else {
+                Task { @MainActor in self?.trackArtworkInFlight.remove(id) }
+                return
+            }
+            Task.detached(priority: .utility) {
+                // Grid cells are ~170pt; 400px covers 2x displays.
+                let cg = Self.decodedThumbnail(from: data, maxPixel: 400)
+                let rgb = ArtworkColor.dominant(from: data)
+                await MainActor.run {
+                    guard let self else { return }
+                    self.trackArtworkInFlight.remove(id)
+                    if let cg {
+                        self.trackArtworkCache.setObject(NSImage(cgImage: cg, size: .zero),
+                                                         forKey: id as NSString)
+                        self.trackArtworkVersion &+= 1
+                    }
+                    if let rgb {
+                        self.trackDominant[id] = Color(.sRGB, red: rgb.red, green: rgb.green, blue: rgb.blue)
+                    }
                 }
             }
         }
