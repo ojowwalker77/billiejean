@@ -127,11 +127,35 @@ struct WidgetContextMenu: NSViewRepresentable {
 
             menu.addItem(.separator())
 
+            let skinItem = NSMenuItem(title: "Skin", action: nil, keyEquivalent: "")
+            let skinMenu = NSMenu()
+            let currentSkin = MainActor.assumeIsolated { model.skinKind }
+            for kind in SkinKind.allCases {
+                let item = NSMenuItem(
+                    title: kind.displayName,
+                    action: #selector(selectSkin(_:)), keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = kind.rawValue
+                item.state = kind == currentSkin ? .on : .off
+                skinMenu.addItem(item)
+            }
+            skinItem.submenu = skinMenu
+            menu.addItem(skinItem)
+
+            menu.addItem(.separator())
+
             let quit = NSMenuItem(title: "Quit Vinylfy", action: #selector(quit), keyEquivalent: "q")
             quit.target = self
             menu.addItem(quit)
 
             return menu
+        }
+
+        @objc private func selectSkin(_ sender: NSMenuItem) {
+            guard let raw = sender.representedObject as? String,
+                  let kind = SkinKind(rawValue: raw) else { return }
+            MainActor.assumeIsolated { model?.skinKind = kind }
         }
 
         @objc private func toggleTransport() {

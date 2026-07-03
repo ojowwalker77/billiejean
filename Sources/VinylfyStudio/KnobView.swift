@@ -1,13 +1,16 @@
 import SwiftUI
+import AppKit
 
-/// A physical knob with a stem+bead above it. Vertical drag changes the value
-/// (full range over 130pt); double-click resets to the default.
+/// A physical knob with a stem+bead above it. Scroll (wheel or trackpad) over
+/// the knob column changes the value with haptic detents; double-click resets
+/// to the default. Clicks on the knob never drag the window.
 @available(macOS 14.2, *)
 struct KnobView: View {
     enum Style { case chrome, black }
 
     let title: String
     let style: Style
+    let skin: Skin
     @Binding var value: Double
     let onReset: () -> Void
 
@@ -17,8 +20,6 @@ struct KnobView: View {
     /// Angle range: −135° … +135°.
     private let minAngle: Double = -135
     private let maxAngle: Double = 135
-
-    @State private var dragStartValue: Double?
 
     private var indicatorAngle: Double {
         minAngle + (maxAngle - minAngle) * value.clamped01
@@ -30,8 +31,10 @@ struct KnobView: View {
             knob
             Text(title)
                 .font(.system(size: 10, weight: .regular, design: .rounded))
-                .foregroundStyle(Theme.secondary)
+                .foregroundStyle(skin.secondary)
         }
+        .contentShape(Rectangle())
+        .modifier(KnobScrollInteraction(value: $value, onReset: onReset))
     }
 
     // MARK: - Stem + bead
@@ -45,7 +48,7 @@ struct KnobView: View {
 
         return ZStack(alignment: .top) {
             Rectangle()
-                .fill(Theme.hairline)
+                .fill(skin.hairline)
                 .frame(width: 1, height: stemHeight)
 
             bead(size: beadSize)
@@ -60,18 +63,18 @@ struct KnobView: View {
         switch style {
         case .black:
             Circle()
-                .fill(Theme.ink)
+                .fill(skin.ink)
                 .frame(width: size, height: size)
                 .shadow(color: .black.opacity(0.2), radius: 1, x: 0, y: 0.5)
         case .chrome:
             Circle()
                 .fill(
                     LinearGradient(
-                        colors: [Theme.chromeTop, Theme.chromeBottom],
+                        colors: [skin.chromeTop, skin.chromeBottom],
                         startPoint: .top, endPoint: .bottom
                     )
                 )
-                .overlay(Circle().strokeBorder(Theme.chromeBorder, lineWidth: 0.5))
+                .overlay(Circle().strokeBorder(skin.chromeBorder, lineWidth: 0.5))
                 .frame(width: size, height: size)
                 .shadow(color: .black.opacity(0.15), radius: 1, x: 0, y: 0.5)
         }
@@ -85,14 +88,13 @@ struct KnobView: View {
         case .chrome: chromeKnob
         case .black:  blackKnob
         }
-        // Shared interaction wraps the styled body below.
     }
 
     private var chromeKnob: some View {
         Circle()
             .fill(
                 RadialGradient(
-                    gradient: Gradient(colors: [Theme.chromeTop, Theme.chromeBottom]),
+                    gradient: Gradient(colors: [skin.chromeTop, skin.chromeBottom]),
                     center: UnitPoint(x: 0.42, y: 0.32),
                     startRadius: 1,
                     endRadius: diameter * 0.72
@@ -108,11 +110,10 @@ struct KnobView: View {
                         )
                     )
             )
-            .overlay(Circle().strokeBorder(Theme.chromeBorder, lineWidth: 0.5))
+            .overlay(Circle().strokeBorder(skin.chromeBorder, lineWidth: 0.5))
             .overlay(indicatorDot)
             .frame(width: diameter, height: diameter)
             .shadow(color: .black.opacity(0.12), radius: 7, x: 0, y: 3)
-            .modifier(KnobInteraction(value: $value, dragStartValue: $dragStartValue, onReset: onReset))
     }
 
     private var blackKnob: some View {
@@ -121,7 +122,7 @@ struct KnobView: View {
             Circle()
                 .fill(
                     RadialGradient(
-                        gradient: Gradient(colors: [Theme.knobHighlight, Theme.knobBody]),
+                        gradient: Gradient(colors: [skin.knobHighlight, skin.knobBody]),
                         center: UnitPoint(x: 0.36, y: 0.30),
                         startRadius: 1,
                         endRadius: diameter * 0.78
@@ -130,14 +131,13 @@ struct KnobView: View {
                 .overlay(
                     Circle()
                         .inset(by: 1)
-                        .stroke(Theme.knobRim, lineWidth: 1)
+                        .stroke(skin.knobRim, lineWidth: 1)
                 )
                 .overlay(indicatorLine)
                 .frame(width: diameter, height: diameter)
                 .shadow(color: .black.opacity(0.18), radius: 12, x: 0, y: 5)
         }
         .frame(width: diameter + 22, height: diameter + 22)
-        .modifier(KnobInteraction(value: $value, dragStartValue: $dragStartValue, onReset: onReset))
     }
 
     // MARK: - Indicators
@@ -145,7 +145,7 @@ struct KnobView: View {
     private var indicatorDot: some View {
         // 4pt ink dot near the edge at the value angle.
         Circle()
-            .fill(Theme.ink)
+            .fill(skin.ink)
             .frame(width: 4, height: 4)
             .offset(y: -(diameter / 2 - 6))
             .rotationEffect(.degrees(indicatorAngle))
@@ -153,9 +153,9 @@ struct KnobView: View {
     }
 
     private var indicatorLine: some View {
-        // 2×10pt paper-colored line at the edge.
+        // 2×10pt line at the edge, in a color that contrasts the knob body.
         Capsule()
-            .fill(Theme.paper)
+            .fill(skin.knobIndicator)
             .frame(width: 2, height: 10)
             .offset(y: -(diameter / 2 - 9))
             .rotationEffect(.degrees(indicatorAngle))
@@ -171,7 +171,7 @@ struct KnobView: View {
                 // Ticks span the same −135…+135 sweep; "passed" ones go ink.
                 let passed = t <= value.clamped01
                 Capsule()
-                    .fill(passed ? Theme.ink : Theme.hairline)
+                    .fill(passed ? skin.ink : skin.hairline)
                     .frame(width: 1.5, height: 2)
                     .offset(y: -ringRadius)
                     .rotationEffect(.degrees(minAngle + (maxAngle - minAngle) * t))
@@ -181,31 +181,94 @@ struct KnobView: View {
     }
 }
 
-/// Vertical-drag + double-click-reset gesture shared by all knob styles.
-/// Full range over 130pt of travel.
+/// Scroll-to-adjust with haptic detents, plus double-click reset. Sits on the
+/// whole knob column (stem + knob + label).
 @available(macOS 14.2, *)
-struct KnobInteraction: ViewModifier {
+struct KnobScrollInteraction: ViewModifier {
     @Binding var value: Double
-    @Binding var dragStartValue: Double?
     let onReset: () -> Void
 
-    private let travel: CGFloat = 130
+    /// Detent grid for haptic ticks: one tick per 5% of travel.
+    private static let detentStep = 0.05
 
     func body(content: Content) -> some View {
-        content
-            .contentShape(Circle())
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { g in
-                        let start = dragStartValue ?? value
-                        if dragStartValue == nil { dragStartValue = start }
-                        // Up = increase.
-                        let delta = Double(-g.translation.height / travel)
-                        value = (start + delta).clamped01
-                    }
-                    .onEnded { _ in dragStartValue = nil }
+        content.overlay(
+            ScrollWheelCatcher(
+                onScroll: { physicalUpDelta, precise in
+                    let pointsPerFullRange: Double = precise ? 260 : 34
+                    let old = value
+                    let new = (old + physicalUpDelta / pointsPerFullRange).clamped01
+                    guard new != old else { return }
+                    value = new
+                    Self.haptics(old: old, new: new)
+                },
+                onDoubleClick: {
+                    onReset()
+                    NSHapticFeedbackManager.defaultPerformer
+                        .perform(.levelChange, performanceTime: .default)
+                }
             )
-            .onTapGesture(count: 2) { onReset() }
+        )
+    }
+
+    private static func haptics(old: Double, new: Double) {
+        let performer = NSHapticFeedbackManager.defaultPerformer
+        // Hard stop at either end of travel.
+        if (new == 0 && old > 0) || (new == 1 && old < 1) {
+            performer.perform(.levelChange, performanceTime: .default)
+            return
+        }
+        // Detent tick when crossing a 5% grid line.
+        if Int(old / detentStep) != Int(new / detentStep) {
+            performer.perform(.alignment, performanceTime: .default)
+        }
+    }
+}
+
+/// AppKit shim that receives scroll-wheel events for the view it covers,
+/// normalizes deltas to "physical upward motion = positive", forwards
+/// double-clicks, and refuses to let clicks drag the window.
+@available(macOS 14.2, *)
+private struct ScrollWheelCatcher: NSViewRepresentable {
+    let onScroll: (Double, Bool) -> Void
+    let onDoubleClick: () -> Void
+
+    func makeNSView(context: Context) -> CatcherView {
+        let view = CatcherView()
+        view.onScroll = onScroll
+        view.onDoubleClick = onDoubleClick
+        return view
+    }
+
+    func updateNSView(_ nsView: CatcherView, context: Context) {
+        nsView.onScroll = onScroll
+        nsView.onDoubleClick = onDoubleClick
+    }
+
+    final class CatcherView: NSView {
+        var onScroll: ((Double, Bool) -> Void)?
+        var onDoubleClick: (() -> Void)?
+
+        // Clicking a control must never move the panel.
+        override var mouseDownCanMoveWindow: Bool { false }
+
+        override func scrollWheel(with event: NSEvent) {
+            var delta = Double(event.scrollingDeltaY)
+            // scrollingDeltaY is content-direction; undo natural-scrolling
+            // inversion so positive always means physical upward motion.
+            if event.isDirectionInvertedFromDevice {
+                delta = -delta
+            }
+            guard delta != 0 else { return }
+            onScroll?(delta, event.hasPreciseScrollingDeltas)
+        }
+
+        override func mouseDown(with event: NSEvent) {
+            if event.clickCount == 2 {
+                onDoubleClick?()
+            }
+            // Swallow single clicks: no window drag, no beep.
+        }
     }
 }
 

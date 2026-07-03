@@ -69,6 +69,19 @@ final class StudioViewModel {
     /// is applied at the view layer when this is nil.
     private(set) var dominantColor: Color?
 
+    // MARK: - Skin
+
+    private static let skinDefaultsKey = "vinylfy.skin"
+
+    /// Selected widget skin, persisted across launches.
+    var skinKind: SkinKind = SkinKind(
+        rawValue: UserDefaults.standard.string(forKey: StudioViewModel.skinDefaultsKey) ?? ""
+    ) ?? .paper {
+        didSet { UserDefaults.standard.set(skinKind.rawValue, forKey: Self.skinDefaultsKey) }
+    }
+
+    var skin: Skin { Skin.skin(for: skinKind) }
+
     // MARK: - Error state
 
     private(set) var startError: String?

@@ -26,7 +26,7 @@ struct RecordView: View {
             }
             .frame(width: diameter, height: diameter)
             .overlay(alignment: .topTrailing) {
-                Tonearm(engaged: model.isRunning, discDiameter: diameter)
+                Tonearm(engaged: model.isRunning, discDiameter: diameter, armColor: model.skin.ink)
             }
         }
         .frame(width: diameter, height: diameter)
@@ -97,26 +97,26 @@ struct RecordView: View {
                     .clipShape(Circle())
             } else {
                 Circle()
-                    .fill(Theme.ink)
+                    .fill(Color(hex: 0x2A2622))
                     .frame(width: labelDiameter, height: labelDiameter)
                     .overlay(
                         Text("VINYLFY")
                             .font(.system(size: 8, weight: .semibold, design: .rounded))
                             .tracking(2)
-                            .foregroundStyle(Theme.paper)
+                            .foregroundStyle(Color(hex: 0xF5F3F0))
                     )
             }
         }
         // Label ring
         .overlay(
             Circle()
-                .strokeBorder(Theme.ink, lineWidth: 1.5)
+                .strokeBorder(Color(hex: 0x2A2622), lineWidth: 1.5)
                 .frame(width: labelDiameter, height: labelDiameter)
         )
         // Center hole
         .overlay(
             Circle()
-                .fill(Theme.paper)
+                .fill(model.skin.cardMid)
                 .frame(width: 5, height: 5)
                 .overlay(
                     Circle().stroke(Color.black.opacity(0.25), lineWidth: 0.5)
@@ -190,6 +190,7 @@ final class InertialSpinner {
 struct Tonearm: View {
     var engaged: Bool
     var discDiameter: CGFloat
+    var armColor: Color
 
     var body: some View {
         // Pivot near the top-right, just outside the disc.
@@ -211,11 +212,11 @@ struct Tonearm: View {
                 p.move(to: pivot)
                 p.addLine(to: headPoint)
             }
-            .stroke(Theme.ink, style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
+            .stroke(armColor, style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
 
             // Head
             RoundedRectangle(cornerRadius: 3, style: .continuous)
-                .fill(Theme.ink)
+                .fill(armColor)
                 .frame(width: 10, height: 16)
                 .overlay(
                     RoundedRectangle(cornerRadius: 3, style: .continuous)
