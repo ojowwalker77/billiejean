@@ -459,12 +459,14 @@ struct PlayerCanvas: View {
         max(300, canvasWidth * 0.38 - WindowChrome.edgeInset * 2)
     }
 
-    /// Platter diameter: the owner's `min(canvasHeight * 0.62, 460)`, further
-    /// clamped so it always fits the left region at small window sizes.
+    /// Deck margin: the plinth floats in the canvas with real breathing room.
+    private var deckMargin: CGFloat { 40 }
+
+    /// Platter diameter, clamped so it always fits the left region.
     private var recordSize: CGFloat {
-        let vertical = canvasHeight - WindowChrome.edgeInset * 2
-        let horizontal = canvasWidth - panelWidth - WindowChrome.edgeInset * 3
-        return max(160, min(canvasHeight * 0.62, 460, vertical, horizontal))
+        let vertical = canvasHeight - deckMargin * 2 - 40
+        let horizontal = canvasWidth - panelWidth - deckMargin * 2 - 60
+        return max(160, min(canvasHeight * 0.56, 410, vertical, horizontal))
     }
 
     var body: some View {
@@ -478,7 +480,8 @@ struct PlayerCanvas: View {
                 .frame(width: panelWidth)
         }
         .faceplate(radius: WindowChrome.panelRadius)
-        .padding(WindowChrome.edgeInset)
+        .padding(deckMargin)
+        .padding(.top, WindowChrome.pillHeight)
     }
 
     private var platter: some View {
@@ -1010,26 +1013,30 @@ struct TurntablePanel: View {
         .frame(height: 16)
     }
 
-    // 6. Three physical knobs (44pt).
+    // 6. Three vertical deck faders (the Technics pitch-fader grammar), each
+    //    with its default marked by an orange detent dot.
     private var knobs: some View {
-        HStack(spacing: 0) {
-            knob("Noise", help: "Noise — scroll to adjust, double-click to reset",
-                 value: Binding(get: { studio.noise }, set: { studio.noise = $0 }),
-                 reset: studio.resetNoise)
-            knob("Main", help: "Main — scroll to adjust, double-click to reset",
-                 value: Binding(get: { studio.main }, set: { studio.main = $0 }),
-                 reset: studio.resetMain)
-            knob("Volume", help: "Volume — scroll to adjust, double-click to reset",
-                 value: Binding(get: { studio.volume }, set: { studio.volume = $0 }),
-                 reset: studio.resetVolume)
+        HStack(alignment: .top, spacing: 0) {
+            fader("Noise", help: "Noise — drag or scroll, double-click to reset",
+                  detent: StudioViewModel.noiseDefault,
+                  value: Binding(get: { studio.noise }, set: { studio.noise = $0 }),
+                  reset: studio.resetNoise)
+            fader("Main", help: "Main — drag or scroll, double-click to reset",
+                  detent: StudioViewModel.mainDefault,
+                  value: Binding(get: { studio.main }, set: { studio.main = $0 }),
+                  reset: studio.resetMain)
+            fader("Volume", help: "Volume — drag or scroll, double-click to reset",
+                  detent: StudioViewModel.volumeDefault,
+                  value: Binding(get: { studio.volume }, set: { studio.volume = $0 }),
+                  reset: studio.resetVolume)
         }
         .frame(maxWidth: .infinity)
     }
 
-    private func knob(_ title: String, help: String,
-                      value: Binding<Double>, reset: @escaping () -> Void) -> some View {
-        PhysicalKnob(help: help, value: value, onReset: reset, size: 44,
-                     label: title, printedScale: true)
+    private func fader(_ title: String, help: String, detent: Double,
+                       value: Binding<Double>, reset: @escaping () -> Void) -> some View {
+        DeckFader(help: help, value: value, onReset: reset,
+                  height: 96, label: title, detent: detent)
             .frame(maxWidth: .infinity)
     }
 

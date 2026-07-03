@@ -132,13 +132,34 @@ struct SlideLever: View {
     let on: Bool
     var action: () -> Void
 
-    private let trackWidth: CGFloat = 14
-    private let trackHeight: CGFloat = 58
-    private let handleSize = CGSize(width: 26, height: 20)
+    private let trackWidth: CGFloat = 12
+    private let trackHeight: CGFloat = 72
+    private let handleSize = CGSize(width: 28, height: 22)
 
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
             track
+                .padding(.vertical, 10)
+                .padding(.horizontal, 6)
+                // Escutcheon: the little mounting plate the lever lives on,
+                // fixed by its own two screws.
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(
+                            LinearGradient(colors: [Theme.Palette.faceTop, Theme.Palette.faceBottom],
+                                           startPoint: .top, endPoint: .bottom)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .strokeBorder(Theme.Palette.bezelDark.opacity(0.7), lineWidth: 0.75)
+                        )
+                        .innerShadow(RoundedRectangle(cornerRadius: 6, style: .continuous),
+                                     color: Theme.Palette.insetHi.opacity(0.35),
+                                     lineWidth: 0.8, blur: 0.6, y: -0.6)
+                        .shadow(color: .black.opacity(0.3), radius: 2, y: 1.5)
+                )
+                .overlay(alignment: .top) { ScrewHead(angle: 21, d: 7).offset(y: -1) }
+                .overlay(alignment: .bottom) { ScrewHead(angle: 67, d: 7).offset(y: 1) }
             labels
         }
         .contentShape(Rectangle())
@@ -181,16 +202,12 @@ struct SlideLever: View {
                                startPoint: .top, endPoint: .bottom)
             )
             .overlay(
-                // Grip lines.
-                VStack(spacing: 3) {
-                    ForEach(0..<3, id: \.self) { _ in
-                        Capsule().fill(Theme.Palette.insetLo.opacity(0.8))
-                            .frame(width: handleSize.width - 12, height: 1)
-                            .overlay(
-                                Capsule().fill(Theme.Palette.insetHi.opacity(0.25))
-                                    .offset(y: 0.7)
-                            )
-                    }
+                // Grip ridges around a center index line.
+                VStack(spacing: 2.5) {
+                    gripLine
+                    Capsule().fill(Theme.Palette.body)
+                        .frame(width: handleSize.width - 10, height: 1.4)
+                    gripLine
                 }
             )
             .overlay(
@@ -203,6 +220,15 @@ struct SlideLever: View {
             .frame(width: handleSize.width, height: handleSize.height)
             .shadow(color: .black.opacity(0.5), radius: 1.5, y: 1.5)
             .shadow(color: .black.opacity(0.2), radius: 4, y: 3)
+    }
+
+    private var gripLine: some View {
+        Capsule()
+            .fill(Theme.Palette.insetLo.opacity(0.8))
+            .frame(width: handleSize.width - 14, height: 0.8)
+            .overlay(
+                Capsule().fill(Theme.Palette.insetHi.opacity(0.25)).offset(y: 0.6)
+            )
     }
 
     private var labels: some View {
@@ -272,29 +298,262 @@ extension View {
     }
 }
 
-/// A tiny slotted screw. Each corner gets a different slot angle — machines are
-/// assembled by hands, not mirrored.
+/// A countersunk phillips screw. Each corner gets a different cross angle —
+/// machines are assembled by hands, not mirrored.
 @available(macOS 14.2, *)
 struct ScrewHead: View {
     var angle: Double = 0
-    var d: CGFloat = 10
+    var d: CGFloat = 11
 
     var body: some View {
-        Circle()
-            .fill(
-                RadialGradient(colors: [Theme.Palette.ctrlLight, Theme.Palette.ctrlDark],
-                               center: UnitPoint(x: 0.38, y: 0.32),
-                               startRadius: 0, endRadius: d * 0.8)
-            )
+        ZStack {
+            // Countersink: the recess the head sits in.
+            Circle()
+                .fill(Theme.Palette.faceWell)
+                .frame(width: d + 5, height: d + 5)
+                .innerShadow(Circle(), color: Theme.Palette.insetLo,
+                             lineWidth: 1.5, blur: 1.2, y: 1)
+                .overlay(
+                    Circle().strokeBorder(Theme.Palette.faceEdgeLight, lineWidth: 0.6)
+                        .mask(
+                            Circle().fill(
+                                LinearGradient(colors: [.clear, .black],
+                                               startPoint: .center, endPoint: .bottom)
+                            )
+                        )
+                        .frame(width: d + 5, height: d + 5)
+                )
+
+            // Head: domed metal.
+            Circle()
+                .fill(
+                    RadialGradient(colors: [Theme.Palette.ctrlLight, Theme.Palette.ctrlDark],
+                                   center: UnitPoint(x: 0.36, y: 0.30),
+                                   startRadius: 0, endRadius: d * 0.85)
+                )
+                .overlay(Circle().strokeBorder(Theme.Palette.bezelDark.opacity(0.8), lineWidth: 0.6))
+                .innerShadow(Circle(), color: Theme.Palette.insetHi.opacity(0.6),
+                             lineWidth: 0.8, blur: 0.6, y: -0.5)
+                .frame(width: d, height: d)
+                .shadow(color: .black.opacity(0.4), radius: 0.8, y: 0.8)
+
+            // Phillips cross: each slot is a dark cut with a light lower lip
+            // (the stamped-metal read).
+            ZStack {
+                crossSlot
+                crossSlot.rotationEffect(.degrees(90))
+            }
+            .rotationEffect(.degrees(angle))
+        }
+        .allowsHitTesting(false)
+    }
+
+    private var crossSlot: some View {
+        ZStack {
+            Capsule()
+                .fill(Theme.Palette.insetLo)
+                .frame(width: d - 3.5, height: 1.4)
+            Capsule()
+                .fill(Theme.Palette.insetHi.opacity(0.45))
+                .frame(width: d - 4.5, height: 0.6)
+                .offset(y: 0.9)
+        }
+    }
+}
+
+// MARK: Vertical deck fader (the Technics pitch-fader grammar)
+
+/// A vertical slider in a recessed channel: printed tick scale beside the slot,
+/// an orange detent dot at the control's default position, and a gripped dark
+/// cap with a center index line. Drag the cap, scroll over it, double-click to
+/// reset. Value 1 = top.
+@available(macOS 14.2, *)
+struct DeckFader: View {
+    let help: String
+    @Binding var value: Double
+    let onReset: () -> Void
+
+    var height: CGFloat = 96
+    var label: String? = nil
+    /// Default position, marked beside the channel with the hardware orange.
+    var detent: Double? = nil
+
+    @State private var hovering = false
+    private static let detentStep = 0.05
+
+    private let slotWidth: CGFloat = 8
+    private let capSize = CGSize(width: 24, height: 15)
+    private var travel: CGFloat { height - capSize.height }
+
+    var body: some View {
+        VStack(spacing: 7) {
+            ZStack {
+                channel
+                scale
+                if let detent {
+                    Circle()
+                        .fill(Theme.Palette.hwOrange)
+                        .frame(width: 3, height: 3)
+                        .shadow(color: Theme.Palette.hwOrange.opacity(0.6), radius: 2)
+                        .offset(x: 12, y: yOffset(for: detent))
+                }
+                cap
+            }
+            .frame(width: 44, height: height)
+            .contentShape(Rectangle())
             .overlay(
-                Capsule()
-                    .fill(Theme.Palette.insetLo)
-                    .frame(width: d - 2, height: 1)
-                    .rotationEffect(.degrees(angle))
+                FaderCatcher(
+                    onScroll: { delta, precise in
+                        let pointsPerFullRange = precise ? Double(travel) * 1.6 : 30
+                        apply((value + delta / pointsPerFullRange).clamped01)
+                    },
+                    onDragDelta: { dy in
+                        apply((value - dy / Double(travel)).clamped01)
+                    },
+                    onDoubleClick: {
+                        onReset()
+                        Haptics.level()
+                    }
+                )
             )
-            .overlay(Circle().strokeBorder(Theme.Palette.bezelDark.opacity(0.8), lineWidth: 0.5))
-            .frame(width: d, height: d)
-            .shadow(color: .black.opacity(0.35), radius: 0.8, y: 0.8)
-            .allowsHitTesting(false)
+            .onHover { hovering = $0 }
+            .help(help)
+
+            if let label {
+                Text(label)
+                    .font(WindowChrome.captionFont)
+                    .foregroundStyle(Theme.Palette.printedInk)
+                    .lineLimit(1)
+            }
+        }
+    }
+
+    private func yOffset(for v: Double) -> CGFloat {
+        travel * CGFloat(0.5 - v.clamped01)
+    }
+
+    private func apply(_ new: Double) {
+        let old = value
+        guard new != old else { return }
+        value = new
+        let performer = NSHapticFeedbackManager.defaultPerformer
+        if (new == 0 && old > 0) || (new == 1 && old < 1) {
+            performer.perform(.levelChange, performanceTime: .default)
+        } else if Int(old / Self.detentStep) != Int(new / Self.detentStep) {
+            performer.perform(.alignment, performanceTime: .default)
+        }
+    }
+
+    // The recessed slot with a darker center guide line.
+    private var channel: some View {
+        ZStack {
+            Color.clear
+                .frame(width: slotWidth, height: height)
+                .insetWell(radius: slotWidth / 2)
+            Rectangle()
+                .fill(Theme.Palette.insetLo.opacity(0.8))
+                .frame(width: 1.5, height: height - 6)
+        }
+    }
+
+    // Printed ticks left of the slot; ends and center slightly stronger.
+    private var scale: some View {
+        ZStack {
+            ForEach(0..<9, id: \.self) { i in
+                let t = Double(i) / 8.0
+                let strong = i == 0 || i == 4 || i == 8
+                Rectangle()
+                    .fill(Theme.Palette.printedInk.opacity(strong ? 0.65 : 0.35))
+                    .frame(width: strong ? 6 : 4, height: 0.75)
+                    .offset(x: -12, y: -travel / 2 + travel * t)
+            }
+        }
+        .allowsHitTesting(false)
+    }
+
+    // The fader cap: gripped dark block with a center index line.
+    private var cap: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 3, style: .continuous)
+                .fill(
+                    LinearGradient(colors: [Theme.Palette.leverTop, Theme.Palette.leverBottom],
+                                   startPoint: .top, endPoint: .bottom)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 3, style: .continuous)
+                        .strokeBorder(Theme.Palette.bezelDark, lineWidth: 0.75)
+                )
+                .innerShadow(RoundedRectangle(cornerRadius: 3, style: .continuous),
+                             color: Theme.Palette.insetHi.opacity(0.5),
+                             lineWidth: 1, blur: 0.8, y: -0.8)
+            // Grip ridges above and below the index line.
+            VStack(spacing: 2.5) {
+                gripLine
+                // Center index line — the white stripe you read the value by.
+                Capsule().fill(Theme.Palette.body)
+                    .frame(width: capSize.width - 6, height: 1.4)
+                gripLine
+            }
+        }
+        .frame(width: capSize.width, height: capSize.height)
+        .shadow(color: .black.opacity(0.5), radius: 1.5, y: 1.5)
+        .shadow(color: .black.opacity(0.2), radius: 4, y: 3)
+        .offset(y: yOffset(for: value))
+        .animation(.easeOut(duration: 0.06), value: value)
+    }
+
+    private var gripLine: some View {
+        Capsule()
+            .fill(Theme.Palette.insetLo.opacity(0.7))
+            .frame(width: capSize.width - 10, height: 0.8)
+            .overlay(
+                Capsule().fill(Theme.Palette.insetHi.opacity(0.25)).offset(y: 0.6)
+            )
+    }
+}
+
+/// Scroll + vertical-drag + double-click catcher for the fader. Drag reports
+/// per-event deltas (positive dy = pointer moved down).
+@available(macOS 14.2, *)
+private struct FaderCatcher: NSViewRepresentable {
+    let onScroll: (Double, Bool) -> Void
+    let onDragDelta: (Double) -> Void
+    let onDoubleClick: () -> Void
+
+    func makeNSView(context: Context) -> CatcherView {
+        let view = CatcherView()
+        view.onScroll = onScroll
+        view.onDragDelta = onDragDelta
+        view.onDoubleClick = onDoubleClick
+        return view
+    }
+
+    func updateNSView(_ nsView: CatcherView, context: Context) {
+        nsView.onScroll = onScroll
+        nsView.onDragDelta = onDragDelta
+        nsView.onDoubleClick = onDoubleClick
+    }
+
+    final class CatcherView: NSView {
+        var onScroll: ((Double, Bool) -> Void)?
+        var onDragDelta: ((Double) -> Void)?
+        var onDoubleClick: (() -> Void)?
+
+        override var mouseDownCanMoveWindow: Bool { false }
+
+        override func scrollWheel(with event: NSEvent) {
+            var delta = Double(event.scrollingDeltaY)
+            if event.isDirectionInvertedFromDevice { delta = -delta }
+            guard delta != 0 else { return }
+            onScroll?(delta, event.hasPreciseScrollingDeltas)
+        }
+
+        override func mouseDown(with event: NSEvent) {
+            if event.clickCount == 2 { onDoubleClick?() }
+        }
+
+        override func mouseDragged(with event: NSEvent) {
+            onDragDelta?(Double(event.deltaY))
+        }
     }
 }
