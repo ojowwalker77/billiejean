@@ -112,6 +112,9 @@ struct SkeuoRaisedCircle: ViewModifier {
                     }
                     Circle().strokeBorder(Theme.Palette.bezelDark, lineWidth: 1)
                 }
+                // Rasterize: the inset-shadow stack is several live blur layers;
+                // cached as one texture per press-state it costs nothing.
+                .drawingGroup()
             )
             .offset(y: pressed ? 1 : 0)
             .shadow(color: .black.opacity(pressed ? 0.20 : 0.45),
@@ -227,6 +230,7 @@ struct SlideLever: View {
                          color: Theme.Palette.insetHi.opacity(0.5),
                          lineWidth: 1, blur: 0.8, y: -0.8)
             .frame(width: handleSize.width, height: handleSize.height)
+            .drawingGroup()
             .shadow(color: .black.opacity(0.5), radius: 1.5, y: 1.5)
             .shadow(color: .black.opacity(0.2), radius: 4, y: 3)
     }
@@ -366,6 +370,8 @@ struct ScrewHead: View {
             }
             .rotationEffect(.degrees(angle))
         }
+        .frame(width: d + 6, height: d + 6)
+        .drawingGroup()
         .allowsHitTesting(false)
     }
 
@@ -399,7 +405,6 @@ struct DeckFader: View {
     /// Default position, marked beside the channel with the hardware orange.
     var detent: Double? = nil
 
-    @State private var hovering = false
     private static let detentStep = 0.05
 
     private let slotWidth: CGFloat = 8
@@ -437,7 +442,6 @@ struct DeckFader: View {
                     }
                 )
             )
-            .onHover { hovering = $0 }
             .help(help)
 
             if let label {
@@ -475,6 +479,7 @@ struct DeckFader: View {
                 .fill(Theme.Palette.insetLo.opacity(0.8))
                 .frame(width: 1.5, height: height - 6)
         }
+        .drawingGroup()
     }
 
     // Printed ticks left of the slot; ends and center slightly stronger.
@@ -517,6 +522,7 @@ struct DeckFader: View {
             }
         }
         .frame(width: capSize.width, height: capSize.height)
+        .drawingGroup()
         .shadow(color: .black.opacity(0.5), radius: 1.5, y: 1.5)
         .shadow(color: .black.opacity(0.2), radius: 4, y: 3)
         .offset(y: yOffset(for: value))

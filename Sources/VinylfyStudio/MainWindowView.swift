@@ -673,7 +673,16 @@ struct BigTonearm: View {
             let dragging = dragProgress != nil
 
             ZStack {
-                arm(geo: geo, angle: angle, dragging: dragging)
+                // RIGID BODY: the arm is drawn once in its canonical pose and
+                // rotated about the pivot as a whole. Re-building the blur-heavy
+                // arm subtree 30x/s was a measurable compositor cost; a rotation
+                // is a free CA transform on cached layers.
+                arm(geo: geo, angle: geo.startAngle, dragging: dragging)
+                    .rotationEffect(
+                        .radians(angle - geo.startAngle),
+                        anchor: UnitPoint(x: geo.pivot.x / discDiameter,
+                                          y: geo.pivot.y / discDiameter)
+                    )
                     .allowsHitTesting(false)
 
                 // Generous 48pt circular hit area riding the headshell — the ONLY
