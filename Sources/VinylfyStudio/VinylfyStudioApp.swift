@@ -13,35 +13,60 @@ struct VinylfyStudioApp: App {
     }
 }
 
-/// Owns the floating always-on-top vinyl widget panel, auto-starts the engine,
-/// wires the right-click context menu, and tears down on quit.
+/// Owns the main window and the floating widget mini-mode, wires the engine to
+/// tap Music, and tears down on quit.
+///
+/// billiejean is a real app: `.regular` activation (Dock presence), one main
+/// window, and the floating widget card as a mini-mode. Main window open →
+/// widget hidden. Main window minimized/closed (with the setting on) → widget
+/// appears. Reopening the main window hides the widget again.
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private var panel: NSPanel?
+    private var widgetPanel: NSPanel?
     private var statusMenuController: AnyObject?
+    private var windowController: AnyObject?
+
+    /// Manual override: the user asked (from chrome) for the widget to show even
+    /// while the main window is up. Reset when the window is hidden/restored.
+    private var widgetForcedVisible = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Accessory app: no dock icon, floats over other apps, but still gets
-        // a status item in the menu bar.
-        NSApp.setActivationPolicy(.accessory)
+        // A real Dock app.
+        NSApp.setActivationPolicy(.regular)
 
         guard #available(macOS 14.2, *) else { return }
         MainActor.assumeIsolated {
-            buildPanel()
-            let controller = StatusMenuController()
-            controller.install()
-            statusMenuController = controller
+            buildWidgetPanel()
+
+            let controller = MainWindowController()
+            controller.onWindowVisible = { [weak self] in self?.handleWindowVisible() }
+            controller.onWindowHidden = { [weak self] in self?.handleWindowHidden() }
+            controller.onToggleWidget = { [weak self] in self?.toggleWidgetManually() }
+            windowController = controller
+
+            let status = StatusMenuController()
+            status.openMainWindow = { [weak self] in self?.showMainWindow() }
+            status.install()
+            statusMenuController = status
+
+            // Engine taps Music only, set BEFORE start (inside bootstrap).
+            StudioViewModel.shared.setMusicTapTarget()
             StudioViewModel.shared.bootstrap()
+
+            controller.showWindow()
         }
     }
 
+    // MARK: - Widget panel
+
     @available(macOS 14.2, *)
     @MainActor
-    private func buildPanel() {
+    private func buildWidgetPanel() {
         let model = StudioViewModel.shared
         let size = NSSize(width: Theme.cardWidth, height: Theme.cardHeight)
 
         let root = CardView(model: model)
             .background(WidgetContextMenu(model: model))
+            .background(WidgetClickCatcher { [weak self] in self?.showMainWindow() })
         let hosting = NSHostingView(rootView: root)
         hosting.frame = NSRect(origin: .zero, size: size)
 
@@ -63,18 +88,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.contentMinSize = size
         panel.contentMaxSize = size
 
-        // Bottom-right of the main screen's visible frame, 24pt margin.
         if let screen = NSScreen.main {
             let vf = screen.visibleFrame
-            let origin = NSPoint(
-                x: vf.maxX - size.width - 24,
-                y: vf.minY + 24
-            )
-            panel.setFrameOrigin(origin)
+            panel.setFrameOrigin(NSPoint(x: vf.maxX - size.width - 24, y: vf.minY + 24))
         }
+        // Start hidden — the main window opens on launch.
+        self.widgetPanel = panel
+    }
 
-        panel.orderFrontRegardless()
-        self.panel = panel
+    private var showWidgetOnMinimize: Bool {
+        UserDefaults.standard.object(forKey: "billiejean.showWidgetOnMinimize") as? Bool ?? true
+    }
+
+    // MARK: - Coordination
+
+    @available(macOS 14.2, *)
+    @MainActor
+    private func showMainWindow() {
+        (windowController as? MainWindowController)?.showWindow()
+    }
+
+    @MainActor
+    private func handleWindowVisible() {
+        widgetForcedVisible = false
+        widgetPanel?.orderOut(nil)
+    }
+
+    @MainActor
+    private func handleWindowHidden() {
+        if showWidgetOnMinimize {
+            widgetPanel?.orderFrontRegardless()
+        }
+    }
+
+    @MainActor
+    private func toggleWidgetManually() {
+        guard let panel = widgetPanel else { return }
+        if panel.isVisible {
+            panel.orderOut(nil)
+            widgetForcedVisible = false
+        } else {
+            panel.orderFrontRegardless()
+            widgetForcedVisible = true
+        }
+    }
+
+    // MARK: - Reopen (Dock icon)
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        if #available(macOS 14.2, *) {
+            MainActor.assumeIsolated { showMainWindow() }
+        }
+        return true
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -86,6 +151,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+/// Bridges a single click on the widget's card (not the knobs) to reopen the
+/// main window. Sits behind the card; knob catchers swallow their own clicks.
+@available(macOS 14.2, *)
+struct WidgetClickCatcher: NSViewRepresentable {
+    var onClick: () -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let v = ClickView()
+        v.onClick = onClick
+        return v
+    }
+    func updateNSView(_ nsView: NSView, context: Context) {
+        (nsView as? ClickView)?.onClick = onClick
+    }
+
+    final class ClickView: NSView {
+        var onClick: (() -> Void)?
+        override var mouseDownCanMoveWindow: Bool { false }
+        override func mouseUp(with event: NSEvent) {
+            // Single click on the record area reopens the main window.
+            if event.clickCount == 1 { onClick?() }
+        }
+    }
+}
+
 /// Menu-bar status item — the primary control surface: transport, A/B,
 /// skins, and quit, always one click away. The menu is rebuilt each time it
 /// opens so checkmarks always reflect current state.
@@ -93,12 +183,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 final class StatusMenuController: NSObject, NSMenuDelegate {
     private var statusItem: NSStatusItem?
 
+    /// Reopen the main window (top menu item).
+    var openMainWindow: (() -> Void)?
+
     @MainActor
     func install() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         item.button?.image = NSImage(
             systemSymbolName: "opticaldisc.fill",
-            accessibilityDescription: "Vinylfy"
+            accessibilityDescription: "billiejean"
         )
         let menu = NSMenu()
         menu.delegate = self
@@ -112,6 +205,15 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
             let model = StudioViewModel.shared
             return (model.isRunning, model.bypass, model.skinKind)
         }
+        let widgetOnMinimize = UserDefaults.standard.object(
+            forKey: "billiejean.showWidgetOnMinimize"
+        ) as? Bool ?? true
+
+        let open = NSMenuItem(title: "Open billiejean", action: #selector(openWindow), keyEquivalent: "")
+        open.target = self
+        menu.addItem(open)
+
+        menu.addItem(.separator())
 
         let transport = NSMenuItem(
             title: running ? "Stop" : "Start",
@@ -147,9 +249,30 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
 
         menu.addItem(.separator())
 
-        let quit = NSMenuItem(title: "Quit Vinylfy", action: #selector(quit), keyEquivalent: "q")
+        let widgetToggle = NSMenuItem(
+            title: "Show Widget on Minimize",
+            action: #selector(toggleWidgetOnMinimize), keyEquivalent: ""
+        )
+        widgetToggle.target = self
+        widgetToggle.state = widgetOnMinimize ? .on : .off
+        menu.addItem(widgetToggle)
+
+        menu.addItem(.separator())
+
+        let quit = NSMenuItem(title: "Quit billiejean", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
+    }
+
+    @objc private func openWindow() {
+        openMainWindow?()
+    }
+
+    @objc private func toggleWidgetOnMinimize() {
+        let current = UserDefaults.standard.object(
+            forKey: "billiejean.showWidgetOnMinimize"
+        ) as? Bool ?? true
+        UserDefaults.standard.set(!current, forKey: "billiejean.showWidgetOnMinimize")
     }
 
     @objc private func toggleTransport() {

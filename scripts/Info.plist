@@ -2,31 +2,31 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>CFBundleName</key>
-	<string>billiejean</string>
 	<key>CFBundleDisplayName</key>
 	<string>billiejean</string>
-	<key>CFBundleIdentifier</key>
-	<string>com.jow.billiejean</string>
 	<key>CFBundleExecutable</key>
 	<string>billiejean</string>
-	<key>CFBundleVersion</key>
-	<string>1</string>
-	<key>CFBundleShortVersionString</key>
-	<string>0.1.0</string>
-	<key>CFBundlePackageType</key>
-	<string>APPL</string>
 	<key>CFBundleIconFile</key>
 	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.jow.billiejean</string>
+	<key>CFBundleName</key>
+	<string>billiejean</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.2</string>
 	<key>LSUIElement</key>
-	<true/>
-	<key>NSHighResolutionCapable</key>
-	<true/>
-	<key>NSAudioCaptureUsageDescription</key>
-	<string>billiejean processes your Apple Music playback through a vinyl effect. It needs to capture the Music app's audio to do that.</string>
+	<false/>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>billiejean controls the Music app (playlists, playback, track info) to act as your vinyl-flavored Apple Music player.</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>billiejean processes your Apple Music playback through a vinyl effect. It needs to capture the Music app's audio to do that.</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
 </dict>
 </plist>

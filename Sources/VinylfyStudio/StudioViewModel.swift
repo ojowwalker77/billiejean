@@ -102,6 +102,11 @@ final class StudioViewModel {
 
     // MARK: - Lifecycle
 
+    /// Route the engine to vinylize Apple Music only. Call BEFORE `start()`.
+    func setMusicTapTarget() {
+        engine.tapTarget = .bundle("com.apple.Music")
+    }
+
     /// Push macro defaults into the engine and auto-start (set-and-forget widget).
     func bootstrap() {
         applyNoise()

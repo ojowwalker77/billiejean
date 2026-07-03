@@ -1,0 +1,149 @@
+import Foundation
+import SwiftUI
+import AppKit
+import NowPlaying
+
+/// The canvas has two states: a wall of vinyl discs (LIBRARY) and one big
+/// spinning record (PLAYER).
+enum CanvasState: Equatable {
+    case library
+    case player(playlistID: String)
+}
+
+/// Owns the main-window flow (library ↔ player), the playlist wall, and lazy
+/// per-playlist artwork. Shares the existing ``StudioViewModel`` singleton for
+/// engine / now-playing / macros — this model never duplicates that state.
+@available(macOS 14.2, *)
+@MainActor
+@Observable
+final class MainViewModel {
+    let studio = StudioViewModel.shared
+    private let music = MusicController()
+
+    // MARK: - Flow
+
+    private(set) var state: CanvasState = .library
+
+    // MARK: - Library
+
+    private(set) var playlists: [MusicPlaylist] = []
+    private(set) var isLoadingPlaylists = false
+    private(set) var musicNotRunning = false
+
+    /// Per-playlist artwork, fetched lazily as discs appear.
+    private(set) var artwork: [String: NSImage] = [:]
+    /// Per-playlist dominant color, cached alongside artwork.
+    private(set) var dominant: [String: Color] = [:]
+    /// Playlists whose artwork fetch is in flight (avoid duplicate requests).
+    private var artworkInFlight: Set<String> = []
+
+    // MARK: - Transient error toast
+
+    private(set) var toast: (symbol: String, message: String)?
+    private var toastDismissWork: DispatchWorkItem?
+
+    // MARK: - Derived
+
+    /// The playlist currently playing (PLAYER state), if any.
+    var currentPlaylist: MusicPlaylist? {
+        guard case .player(let id) = state else { return nil }
+        return playlists.first { $0.id == id }
+    }
+
+    var currentPlaylistName: String {
+        currentPlaylist?.name ?? "Now Playing"
+    }
+
+    // MARK: - Library loading
+
+    func loadPlaylistsIfNeeded() {
+        guard playlists.isEmpty, !isLoadingPlaylists else { return }
+        refreshPlaylists()
+    }
+
+    func refreshPlaylists() {
+        isLoadingPlaylists = true
+        music.fetchPlaylists { [weak self] result in
+            Task { @MainActor in
+                guard let self else { return }
+                self.isLoadingPlaylists = false
+                switch result {
+                case .success(let lists):
+                    self.playlists = lists
+                    self.musicNotRunning = lists.isEmpty && !self.music.isMusicRunning
+                case .failure:
+                    self.playlists = []
+                    self.musicNotRunning = !self.music.isMusicRunning
+                    self.showToast(symbol: "exclamationmark.triangle", message: "Couldn't load playlists")
+                }
+            }
+        }
+    }
+
+    /// Launch Music, then refetch after a short delay so playlists populate.
+    func openMusic() {
+        music.launchMusicIfNeeded()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            self?.refreshPlaylists()
+        }
+    }
+
+    // MARK: - Lazy artwork
+
+    func loadArtwork(for playlist: MusicPlaylist) {
+        let id = playlist.id
+        guard artwork[id] == nil, !artworkInFlight.contains(id) else { return }
+        artworkInFlight.insert(id)
+        music.fetchArtwork(forPlaylist: id) { [weak self] data in
+            Task { @MainActor in
+                guard let self else { return }
+                self.artworkInFlight.remove(id)
+                guard let data, let image = NSImage(data: data) else { return }
+                self.artwork[id] = image
+                if let rgb = ArtworkColor.dominant(from: data) {
+                    self.dominant[id] = Color(.sRGB, red: rgb.red, green: rgb.green, blue: rgb.blue)
+                }
+            }
+        }
+    }
+
+    func artworkImage(for id: String) -> NSImage? { artwork[id] }
+    func dominantColor(for id: String) -> Color? { dominant[id] }
+
+    // MARK: - Playback flow
+
+    /// Play a playlist and transition to the PLAYER state.
+    func play(_ playlist: MusicPlaylist) {
+        music.playPlaylist(id: playlist.id, shuffle: false)
+        withAnimation(ChromeMotion.spring) {
+            state = .player(playlistID: playlist.id)
+        }
+    }
+
+    func backToLibrary() {
+        withAnimation(ChromeMotion.spring) {
+            state = .library
+        }
+    }
+
+    // MARK: - Transport (delegates to MusicController)
+
+    func playPause() { music.playPause() }
+    func nextTrack() { music.nextTrack() }
+    func previousTrack() { music.previousTrack() }
+    func seek(toSeconds seconds: Double) { music.seek(toSeconds: seconds) }
+
+    // MARK: - Toast
+
+    func showToast(symbol: String, message: String) {
+        toastDismissWork?.cancel()
+        withAnimation(ChromeMotion.spring) {
+            toast = (symbol, message)
+        }
+        let work = DispatchWorkItem { [weak self] in
+            withAnimation(ChromeMotion.dismiss) { self?.toast = nil }
+        }
+        toastDismissWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0, execute: work)
+    }
+}
