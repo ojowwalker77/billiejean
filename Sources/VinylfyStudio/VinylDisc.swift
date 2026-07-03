@@ -291,10 +291,14 @@ struct PlayerRecord: View {
     }
 
     var body: some View {
-        TimelineView(.animation) { context in
+        // 30fps is plenty for a 33rpm platter; .drawingGroup rasterizes the
+        // face once so each frame is a texture rotation, not a re-layout.
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0,
+                                paused: !spinning && !spinner.isCoasting)) { context in
             let angle = spinner.angle(at: context.date, spinning: spinning)
             ZStack {
                 VinylDiscFace(diameter: diameter, artwork: artwork, dominant: dominant, cold: cold)
+                    .drawingGroup()
                     .rotationEffect(.degrees(angle))
                 // Hard rim for crispness (matches RecordView's rim discipline).
                 Circle()

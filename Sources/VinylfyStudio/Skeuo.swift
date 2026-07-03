@@ -132,34 +132,43 @@ struct SlideLever: View {
     let on: Bool
     var action: () -> Void
 
-    private let trackWidth: CGFloat = 12
-    private let trackHeight: CGFloat = 72
-    private let handleSize = CGSize(width: 28, height: 22)
+    private let trackWidth: CGFloat = 14
+    private let trackHeight: CGFloat = 92
+    private let handleSize = CGSize(width: 36, height: 28)
 
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
             track
-                .padding(.vertical, 10)
-                .padding(.horizontal, 6)
-                // Escutcheon: the little mounting plate the lever lives on,
-                // fixed by its own two screws.
+                .padding(.vertical, 14)
+                .padding(.horizontal, 9)
+                // Escutcheon: the raised mounting plate the lever lives on,
+                // with a machined edge and its own two screws.
                 .background(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
                         .fill(
                             LinearGradient(colors: [Theme.Palette.faceTop, Theme.Palette.faceBottom],
                                            startPoint: .top, endPoint: .bottom)
                         )
                         .overlay(
-                            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                .strokeBorder(Theme.Palette.bezelDark.opacity(0.7), lineWidth: 0.75)
+                            // Machined edge: bright top lip, dark undercut.
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .strokeBorder(Theme.Palette.insetHi.opacity(0.30), lineWidth: 0.8)
+                                .mask(
+                                    RoundedRectangle(cornerRadius: 8, style: .continuous).fill(
+                                        LinearGradient(colors: [.black, .clear],
+                                                       startPoint: .top, endPoint: .center)
+                                    )
+                                )
                         )
-                        .innerShadow(RoundedRectangle(cornerRadius: 6, style: .continuous),
-                                     color: Theme.Palette.insetHi.opacity(0.35),
-                                     lineWidth: 0.8, blur: 0.6, y: -0.6)
-                        .shadow(color: .black.opacity(0.3), radius: 2, y: 1.5)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .strokeBorder(Theme.Palette.bezelDark.opacity(0.8), lineWidth: 0.8)
+                        )
+                        .shadow(color: .black.opacity(0.45), radius: 1, y: 1)
+                        .shadow(color: .black.opacity(0.2), radius: 4, y: 2.5)
                 )
-                .overlay(alignment: .top) { ScrewHead(angle: 21, d: 7).offset(y: -1) }
-                .overlay(alignment: .bottom) { ScrewHead(angle: 67, d: 7).offset(y: 1) }
+                .overlay(alignment: .top) { ScrewHead(angle: 21, d: 9).offset(y: 2.5) }
+                .overlay(alignment: .bottom) { ScrewHead(angle: 67, d: 9).offset(y: -2.5) }
             labels
         }
         .contentShape(Rectangle())
@@ -247,7 +256,7 @@ struct SlideLever: View {
                 .frame(width: 3.5, height: 3.5)
                 .shadow(color: active ? Theme.Palette.hwOrange.opacity(0.7) : .clear, radius: 2.5)
             Text(text)
-                .font(WindowChrome.microFont)
+                .font(WindowChrome.captionFont)
                 .foregroundStyle(active ? Theme.Palette.body : Theme.Palette.printedInk)
         }
         .animation(ChromeMotion.hover, value: active)
@@ -282,10 +291,10 @@ struct Faceplate: ViewModifier {
                 )
                 .overlay(shape.strokeBorder(Theme.Palette.bezelDark.opacity(0.6), lineWidth: 1))
             )
-            .overlay(alignment: .topLeading) { ScrewHead().padding(11) }
-            .overlay(alignment: .topTrailing) { ScrewHead(angle: 32).padding(11) }
-            .overlay(alignment: .bottomLeading) { ScrewHead(angle: -18).padding(11) }
-            .overlay(alignment: .bottomTrailing) { ScrewHead(angle: 74).padding(11) }
+            .overlay(alignment: .topLeading) { ScrewHead().padding(14) }
+            .overlay(alignment: .topTrailing) { ScrewHead(angle: 32).padding(14) }
+            .overlay(alignment: .bottomLeading) { ScrewHead(angle: -18).padding(14) }
+            .overlay(alignment: .bottomTrailing) { ScrewHead(angle: 74).padding(14) }
             .shadow(color: Theme.Shadow.panel.color,
                     radius: Theme.Shadow.panel.radius, y: Theme.Shadow.panel.y)
     }
@@ -303,45 +312,57 @@ extension View {
 @available(macOS 14.2, *)
 struct ScrewHead: View {
     var angle: Double = 0
-    var d: CGFloat = 11
+    var d: CGFloat = 18
 
     var body: some View {
         ZStack {
             // Countersink: the recess the head sits in.
             Circle()
                 .fill(Theme.Palette.faceWell)
-                .frame(width: d + 5, height: d + 5)
+                .frame(width: d + 6, height: d + 6)
                 .innerShadow(Circle(), color: Theme.Palette.insetLo,
-                             lineWidth: 1.5, blur: 1.2, y: 1)
+                             lineWidth: 2, blur: 1.6, y: 1.2)
                 .overlay(
-                    Circle().strokeBorder(Theme.Palette.faceEdgeLight, lineWidth: 0.6)
+                    Circle().strokeBorder(Theme.Palette.faceEdgeLight, lineWidth: 0.7)
                         .mask(
                             Circle().fill(
                                 LinearGradient(colors: [.clear, .black],
                                                startPoint: .center, endPoint: .bottom)
                             )
                         )
-                        .frame(width: d + 5, height: d + 5)
+                        .frame(width: d + 6, height: d + 6)
                 )
 
-            // Head: domed metal.
+            // Head: domed metal with a turned rim bevel.
             Circle()
                 .fill(
                     RadialGradient(colors: [Theme.Palette.ctrlLight, Theme.Palette.ctrlDark],
                                    center: UnitPoint(x: 0.36, y: 0.30),
                                    startRadius: 0, endRadius: d * 0.85)
                 )
-                .overlay(Circle().strokeBorder(Theme.Palette.bezelDark.opacity(0.8), lineWidth: 0.6))
+                .overlay(
+                    // The machined bevel ring just inside the edge.
+                    Circle().inset(by: d * 0.12)
+                        .strokeBorder(Theme.Palette.insetHi.opacity(0.35), lineWidth: 0.7)
+                )
+                .overlay(
+                    Circle().inset(by: d * 0.12 + 0.7)
+                        .strokeBorder(Theme.Palette.insetLo.opacity(0.45), lineWidth: 0.6)
+                )
+                .overlay(Circle().strokeBorder(Theme.Palette.bezelDark.opacity(0.8), lineWidth: 0.7))
                 .innerShadow(Circle(), color: Theme.Palette.insetHi.opacity(0.6),
-                             lineWidth: 0.8, blur: 0.6, y: -0.5)
+                             lineWidth: 1, blur: 0.7, y: -0.6)
                 .frame(width: d, height: d)
-                .shadow(color: .black.opacity(0.4), radius: 0.8, y: 0.8)
+                .shadow(color: .black.opacity(0.45), radius: 1, y: 1)
 
             // Phillips cross: each slot is a dark cut with a light lower lip
-            // (the stamped-metal read).
+            // (the stamped-metal read), tapered toward the center dimple.
             ZStack {
                 crossSlot
                 crossSlot.rotationEffect(.degrees(90))
+                Circle()
+                    .fill(Theme.Palette.insetLo)
+                    .frame(width: d * 0.16, height: d * 0.16)
             }
             .rotationEffect(.degrees(angle))
         }
@@ -352,11 +373,11 @@ struct ScrewHead: View {
         ZStack {
             Capsule()
                 .fill(Theme.Palette.insetLo)
-                .frame(width: d - 3.5, height: 1.4)
+                .frame(width: d - 4.5, height: d * 0.13)
             Capsule()
                 .fill(Theme.Palette.insetHi.opacity(0.45))
-                .frame(width: d - 4.5, height: 0.6)
-                .offset(y: 0.9)
+                .frame(width: d - 6, height: d * 0.06)
+                .offset(y: d * 0.09)
         }
     }
 }

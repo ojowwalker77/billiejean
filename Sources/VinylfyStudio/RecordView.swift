@@ -13,7 +13,8 @@ struct RecordView: View {
     var body: some View {
         // The spin driver: TimelineView accumulates angle with inertial ramp so
         // the disc spins up / coasts down and never hard-starts.
-        TimelineView(.animation) { context in
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0,
+                                paused: !model.isSpinning && !spinner.isCoasting)) { context in
             let angle = spinner.angle(at: context.date, spinning: model.isSpinning)
             ZStack {
                 // --- Rotating disc (body + grooves + label) ---
@@ -167,6 +168,9 @@ final class InertialSpinner {
     private let targetVelocity: Double = 360.0 / 1.8
     /// Exponential approach time constant.
     private let tau: Double = 0.6
+
+    /// Still moving (spin-down inertia) — timelines must not pause yet.
+    var isCoasting: Bool { abs(velocity) > 1 }
 
     func angle(at now: Date, spinning: Bool) -> Double {
         defer { lastTimestamp = now }

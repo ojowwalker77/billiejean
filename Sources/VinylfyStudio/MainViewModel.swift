@@ -48,7 +48,14 @@ final class MainViewModel {
     private(set) var lastSongGridPlaylistID: String?
 
     /// Per-track artwork + dominant color, keyed by track id.
-    private(set) var trackArtwork: [String: NSImage] = [:]
+    /// Decoded track covers, bounded (large playlists must not pin bitmaps).
+    @ObservationIgnored private let trackArtworkCache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 150
+        return cache
+    }()
+    /// Bumped when a track cover lands so grid cells re-render.
+    private(set) var trackArtworkVersion = 0
     private(set) var trackDominant: [String: Color] = [:]
     private var trackArtworkInFlight: Set<String> = []
 
@@ -140,14 +147,16 @@ final class MainViewModel {
 
     func loadTrackArtwork(_ track: MusicTrack, inPlaylist playlistID: String) {
         let id = track.id
-        guard trackArtwork[id] == nil, !trackArtworkInFlight.contains(id) else { return }
+        guard trackArtworkCache.object(forKey: id as NSString) == nil,
+              !trackArtworkInFlight.contains(id) else { return }
         trackArtworkInFlight.insert(id)
         music.fetchArtwork(forTrack: id, inPlaylist: playlistID) { [weak self] data in
             Task { @MainActor in
                 guard let self else { return }
                 self.trackArtworkInFlight.remove(id)
                 guard let data, let image = NSImage(data: data) else { return }
-                self.trackArtwork[id] = image
+                self.trackArtworkCache.setObject(image, forKey: id as NSString)
+                self.trackArtworkVersion &+= 1
                 if let rgb = ArtworkColor.dominant(from: data) {
                     self.trackDominant[id] = Color(.sRGB, red: rgb.red, green: rgb.green, blue: rgb.blue)
                 }
@@ -155,7 +164,13 @@ final class MainViewModel {
         }
     }
 
-    func trackArtworkImage(for id: String) -> NSImage? { trackArtwork[id] }
+    func trackArtworkImage(for id: String) -> NSImage? {
+        // Touch the observed version so cells re-render when images land; the
+        // decoded images themselves live in a bounded NSCache (a 665-track
+        // playlist must not pin hundreds of MB of bitmaps).
+        _ = trackArtworkVersion
+        return trackArtworkCache.object(forKey: id as NSString)
+    }
     func trackDominantColor(for id: String) -> Color? { trackDominant[id] }
 
     // MARK: - Navigation flow

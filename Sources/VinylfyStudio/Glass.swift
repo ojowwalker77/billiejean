@@ -81,8 +81,15 @@ struct PanelBackground: View {
     var body: some View {
         let glass = min(1.0, max(0.0, transparency))
         ZStack {
-            VisualEffectBackground(material: .hudWindow, blending: .behindWindow, state: .active)
-            Theme.Palette.windowCanvas.opacity(1.0 - 0.65 * glass)  // never fully clear
+            // A full-window behind-window backdrop keeps the compositor
+            // resampling the desktop forever (measured ~25% CPU idle). Only
+            // mount it when the user actually dials transparency in.
+            if glass > 0.001 {
+                VisualEffectBackground(material: .hudWindow, blending: .behindWindow, state: .active)
+                Theme.Palette.windowCanvas.opacity(1.0 - 0.65 * glass)
+            } else {
+                Theme.Palette.windowCanvas
+            }
         }
         .ignoresSafeArea()
     }

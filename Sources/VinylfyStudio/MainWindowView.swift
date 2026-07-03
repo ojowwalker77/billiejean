@@ -518,7 +518,8 @@ struct PlatterView: View {
     @State private var spinner = InertialSpinner()
 
     var body: some View {
-        TimelineView(.animation) { context in
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0,
+                                paused: !spinning && !spinner.isCoasting)) { context in
             let angle = spinner.angle(at: context.date, spinning: spinning)
             ZStack {
                 Circle()
@@ -533,8 +534,11 @@ struct PlatterView: View {
                         )
                     )
                     .overlay(Circle().strokeBorder(Theme.Palette.bezelDark, lineWidth: 1))
-                // Strobe dots around the rim, rotating with the platter.
+                // Strobe dots around the rim: ONE canvas rasterized once, then
+                // rotated as a texture (72 views re-diffed per frame was a
+                // measurable CPU fire).
                 strobeDots
+                    .drawingGroup()
                     .rotationEffect(.degrees(angle))
             }
             .frame(width: diameter, height: diameter)
@@ -545,16 +549,20 @@ struct PlatterView: View {
     }
 
     private var strobeDots: some View {
-        let count = 72
-        return ZStack {
-            ForEach(0..<count, id: \.self) { i in
-                Circle()
-                    .fill(Theme.Palette.insetHi.opacity(0.55))
-                    .frame(width: 2, height: 2)
-                    .offset(y: -diameter / 2 + 5)
-                    .rotationEffect(.degrees(Double(i) / Double(count) * 360))
+        Canvas { ctx, size in
+            let count = 72
+            let r = size.width / 2 - 5
+            let center = CGPoint(x: size.width / 2, y: size.height / 2)
+            for i in 0..<count {
+                let a = Double(i) / Double(count) * 2 * .pi
+                let rect = CGRect(x: center.x + cos(a) * r - 1,
+                                  y: center.y + sin(a) * r - 1,
+                                  width: 2, height: 2)
+                ctx.fill(Path(ellipseIn: rect),
+                         with: .color(Theme.Palette.insetHi.opacity(0.55)))
             }
         }
+        .frame(width: diameter, height: diameter)
     }
 }
 
@@ -650,7 +658,7 @@ struct BigTonearm: View {
     var body: some View {
         let geo = TonearmGeometry(disc: discDiameter)
 
-        return TimelineView(.animation) { timeline in
+        return TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
             let now = timeline.date
             // Feed the clock every tick (cheap; only re-anchors on real change).
             let _ = clock.ingest(position: studio.positionSeconds,
@@ -804,7 +812,7 @@ struct BigTonearm: View {
                 Circle()
                     .strokeBorder(Theme.Palette.insetLo.opacity(0.5), lineWidth: 1)
                     .frame(width: 12, height: 12)
-                ScrewHead(angle: 58)
+                ScrewHead(angle: 58, d: 9)
             }
             .frame(width: 22, height: 22)
             .shadow(color: .black.opacity(0.4), radius: 1.5, y: 1.5)

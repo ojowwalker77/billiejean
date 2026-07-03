@@ -35,8 +35,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         guard #available(macOS 14.2, *) else { return }
         MainActor.assumeIsolated {
-            buildWidgetPanel()
-
+            // The widget panel is built LAZILY on first show — a hidden panel
+            // still runs its SwiftUI display link and burns CPU forever.
             let controller = MainWindowController()
             controller.onWindowVisible = { [weak self] in self?.handleWindowVisible() }
             controller.onWindowHidden = { [weak self] in self?.handleWindowHidden() }
@@ -92,8 +92,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let vf = screen.visibleFrame
             panel.setFrameOrigin(NSPoint(x: vf.maxX - size.width - 24, y: vf.minY + 24))
         }
-        // Start hidden — the main window opens on launch.
         self.widgetPanel = panel
+    }
+
+    /// Show the widget, building it on demand.
+    @available(macOS 14.2, *)
+    @MainActor
+    private func showWidget() {
+        if widgetPanel == nil { buildWidgetPanel() }
+        widgetPanel?.orderFrontRegardless()
+    }
+
+    /// Hide AND destroy the widget — an ordered-out panel keeps its SwiftUI
+    /// display link alive (measured: ~28% CPU from an invisible spinning disc).
+    @MainActor
+    private func hideWidget() {
+        widgetPanel?.orderOut(nil)
+        widgetPanel?.contentView = nil
+        widgetPanel = nil
     }
 
     private var showWidgetOnMinimize: Bool {
@@ -111,24 +127,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor
     private func handleWindowVisible() {
         widgetForcedVisible = false
-        widgetPanel?.orderOut(nil)
+        if #available(macOS 14.2, *) { hideWidget() }
     }
 
     @MainActor
     private func handleWindowHidden() {
+        guard #available(macOS 14.2, *) else { return }
         if showWidgetOnMinimize {
-            widgetPanel?.orderFrontRegardless()
+            showWidget()
         }
     }
 
     @MainActor
     private func toggleWidgetManually() {
-        guard let panel = widgetPanel else { return }
-        if panel.isVisible {
-            panel.orderOut(nil)
+        guard #available(macOS 14.2, *) else { return }
+        if widgetPanel?.isVisible == true {
+            hideWidget()
             widgetForcedVisible = false
         } else {
-            panel.orderFrontRegardless()
+            showWidget()
             widgetForcedVisible = true
         }
     }
