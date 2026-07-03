@@ -226,6 +226,30 @@ extension Theme {
         // Solid time-chip surface for the tonearm seek (rule 10 — never translucent).
         static var chipFill: Color { c(f.isDark ? f.surface0 : f.mantle) }
 
+        // Braun-inspired skeuomorphic materials (the instrument, not chrome).
+        // Light flavors read as warm cream hardware; dark flavors as charcoal.
+        static var faceTop: Color { f.isDark ? c(f.surface1) : c(f.mantle) }
+        static var faceBottom: Color {
+            f.isDark ? c(f.surface0).darkened(by: 0.30) : c(f.crust)
+        }
+        static var faceEdgeLight: Color { .white.opacity(f.isDark ? 0.08 : 0.75) }
+        static var faceWell: Color {
+            f.isDark ? c(f.base).mixed(with: c(f.surface0), by: 0.4) : c(f.surface1)
+        }
+        static var ctrlLight: Color { f.isDark ? c(f.surface2) : c(f.mantle) }
+        static var ctrlDark: Color {
+            f.isDark ? c(f.surface0).darkened(by: 0.18) : c(f.surface2)
+        }
+        static var bezelDark: Color { .black.opacity(f.isDark ? 0.55 : 0.30) }
+        static var insetHi: Color { .white.opacity(f.isDark ? 0.22 : 0.90) }
+        static var insetLo: Color { .black.opacity(f.isDark ? 0.60 : 0.30) }
+        static var printedInk: Color { c(f.subtext0) }
+        static var leverTop: Color { f.isDark ? c(f.surface2) : c(f.overlay1) }
+        static var leverBottom: Color { f.isDark ? c(f.crust) : c(f.overlay2).darkened(by: 0.35) }
+        /// Hardware colors — the ONE orange and ONE green, always tint slots.
+        static var hwOrange: Color { tint(1) }
+        static var hwGreen: Color { tint(3) }
+
         // A tint slot by index (user colors are slot indexes, resolved at draw).
         static func tint(_ index: Int) -> Color {
             let tints = f.tints

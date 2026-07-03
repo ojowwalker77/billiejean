@@ -35,13 +35,17 @@ struct VinylDiscFace: View {
     }
 
     private var bodyGradient: RadialGradient {
-        RadialGradient(
+        // Real vinyl is near-black; the pressing color is a low tint that lives
+        // in the mid-grooves, never a saturated wash.
+        let ink = Color(hex: 0x0E0C0A)
+        return RadialGradient(
             gradient: Gradient(stops: [
-                .init(color: Color(hex: 0x14100E), location: 0.00),
-                .init(color: Color(hex: 0x14100E), location: 0.19),
-                .init(color: base.darkened(by: 0.35), location: 0.48),
-                .init(color: base, location: 0.75),
-                .init(color: base.darkened(by: 0.5), location: 1.0),
+                .init(color: ink, location: 0.00),
+                .init(color: ink, location: 0.20),
+                .init(color: ink.mixed(with: base, by: 0.16), location: 0.45),
+                .init(color: ink.mixed(with: base, by: 0.28), location: 0.68),
+                .init(color: ink.mixed(with: base, by: 0.14), location: 0.88),
+                .init(color: ink.mixed(with: base, by: 0.05), location: 1.0),
             ]),
             center: .center,
             startRadius: 0,
@@ -50,20 +54,32 @@ struct VinylDiscFace: View {
     }
 
     private var grooves: some View {
-        let labelRadius = diameter * 0.19
+        let labelRadius = diameter * 0.20
         let rimRadius = diameter / 2 - 3
-        let count = 14
+        let count = 24
         return ZStack {
+            // Fine groove texture — crisp hairline rings, no blur.
             ForEach(0..<count, id: \.self) { i in
                 let t = Double(i) / Double(count - 1)
                 let r = labelRadius + (rimRadius - labelRadius) * t
                 Circle()
                     .stroke(
-                        i.isMultiple(of: 2) ? Color.white.opacity(0.05) : Color.black.opacity(0.06),
+                        i.isMultiple(of: 2) ? Color.white.opacity(0.055) : Color.black.opacity(0.30),
                         lineWidth: 0.5
                     )
                     .frame(width: r * 2, height: r * 2)
             }
+            // Track-gap bands: the darker rings that separate songs on a pressing.
+            ForEach([0.42, 0.62, 0.80], id: \.self) { f in
+                let r = labelRadius + (rimRadius - labelRadius) * f
+                Circle()
+                    .stroke(Color.black.opacity(0.45), lineWidth: 1.4)
+                    .frame(width: r * 2, height: r * 2)
+            }
+            // Lead-in ring at the rim.
+            Circle()
+                .stroke(Color.black.opacity(0.5), lineWidth: 1)
+                .frame(width: rimRadius * 2, height: rimRadius * 2)
         }
         .allowsHitTesting(false)
     }

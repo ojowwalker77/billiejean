@@ -625,7 +625,6 @@ struct BigTonearm: View {
 
     // MARK: Arm rendering
 
-    @ViewBuilder
     private func arm(geo: TonearmGeometry, angle: Double, dragging: Bool) -> some View {
         let stylus = geo.stylus(atAngle: angle)
         let pivot = geo.pivot
@@ -640,55 +639,113 @@ struct BigTonearm: View {
         // headshell scales up, the stylus glow disappears.
         let lift: CGFloat = dragging ? 1 : 0
 
-        ZStack {
-            // Arm (pivot → stylus)
+        // Perpendicular unit normal to the arm — the light falls across the tube.
+        let normal = CGVector(dx: -sin(armAngle.radians), dy: cos(armAngle.radians))
+        func shifted(_ p: CGPoint, by d: CGFloat) -> CGPoint {
+            CGPoint(x: p.x + normal.dx * d, y: p.y + normal.dy * d)
+        }
+        func tube(_ a: CGPoint, _ b: CGPoint, offset: CGFloat,
+                  color: Color, width: CGFloat) -> some View {
             Path { p in
-                p.move(to: pivot)
-                p.addLine(to: stylus)
+                p.move(to: shifted(a, by: offset))
+                p.addLine(to: shifted(b, by: offset))
             }
-            .stroke(Theme.Palette.body, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+            .stroke(color, style: StrokeStyle(lineWidth: width, lineCap: .round))
+        }
 
-            // Counterweight stub behind the pivot
-            Path { p in
-                p.move(to: pivot)
-                p.addLine(to: backPoint)
-            }
-            .stroke(Theme.Palette.body, style: StrokeStyle(lineWidth: 2, lineCap: .round))
-            Circle()
-                .fill(Theme.Palette.body)
-                .frame(width: discDiameter * 0.06, height: discDiameter * 0.06)
+        return ZStack {
+            // Arm tube (pivot → stylus): a machined cylinder — dark base stroke,
+            // lighter body, a bright catch-light line riding the upper flank.
+            tube(pivot, stylus, offset: 0, color: Theme.Palette.leverBottom, width: 4)
+            tube(pivot, stylus, offset: -0.5, color: Theme.Palette.ctrlDark, width: 2.6)
+            tube(pivot, stylus, offset: -1.1, color: Theme.Palette.insetHi.opacity(0.8), width: 0.8)
+
+            // Counterweight boom + cylinder behind the pivot.
+            tube(pivot, backPoint, offset: 0, color: Theme.Palette.leverBottom, width: 3)
+            tube(pivot, backPoint, offset: -0.8, color: Theme.Palette.insetHi.opacity(0.5), width: 0.7)
+            RoundedRectangle(cornerRadius: 2.5, style: .continuous)
+                .fill(
+                    LinearGradient(colors: [Theme.Palette.leverTop, Theme.Palette.leverBottom],
+                                   startPoint: .top, endPoint: .bottom)
+                )
+                .overlay(
+                    // Machined rings on the counterweight.
+                    HStack(spacing: 2) {
+                        ForEach(0..<2, id: \.self) { _ in
+                            Rectangle().fill(Theme.Palette.insetLo.opacity(0.7)).frame(width: 0.8)
+                        }
+                    }
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 2.5, style: .continuous)
+                        .strokeBorder(Theme.Palette.bezelDark, lineWidth: 0.6)
+                )
+                .frame(width: discDiameter * 0.055, height: discDiameter * 0.075)
+                .rotationEffect(armAngle + .degrees(90))
                 .position(backPoint)
+                .shadow(color: .black.opacity(0.4), radius: 1, y: 1)
 
             // Stylus contact glow — present only while the needle is ON the record.
             Circle()
-                .fill(Theme.Palette.accent)
-                .frame(width: 8, height: 8)
+                .fill(Theme.Palette.hwOrange)
+                .frame(width: 7, height: 7)
                 .blur(radius: 3)
-                .opacity(dragging ? 0 : (isPlaying ? 0.7 : 0.35))
+                .opacity(dragging ? 0 : (isPlaying ? 0.75 : 0.35))
                 .position(stylus)
                 .animation(.easeOut(duration: 0.25), value: dragging)
 
-            // Angled headshell at the tip
-            RoundedRectangle(cornerRadius: 3, style: .continuous)
-                .fill(Theme.Palette.body)
-                .frame(width: discDiameter * 0.04, height: discDiameter * 0.085)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 2, style: .continuous)
-                        .fill(Theme.Palette.chromeGlyphHover.opacity(0.25))
-                        .frame(width: discDiameter * 0.016, height: discDiameter * 0.028)
-                        .offset(y: -discDiameter * 0.016)
-                )
-                .scaleEffect(dragging ? 1.06 : 1.0)
-                .rotationEffect(armAngle + .degrees(90 + 14))
-                .position(stylus)
-                .animation(ChromeMotion.spring, value: dragging)
+            // Headshell: the dark angled cartridge with a finger lift and the
+            // one orange cue dot (the Braun accent).
+            ZStack {
+                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                    .fill(
+                        LinearGradient(colors: [Theme.Palette.leverTop, Theme.Palette.leverBottom],
+                                       startPoint: .topLeading, endPoint: .bottomTrailing)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 3, style: .continuous)
+                            .strokeBorder(Theme.Palette.bezelDark, lineWidth: 0.75)
+                    )
+                    .innerShadow(RoundedRectangle(cornerRadius: 3, style: .continuous),
+                                 color: Theme.Palette.insetHi.opacity(0.4),
+                                 lineWidth: 0.8, blur: 0.6, y: -0.5)
+                // Finger lift — the little bar you grab.
+                Capsule()
+                    .fill(Theme.Palette.ctrlLight)
+                    .frame(width: discDiameter * 0.008, height: discDiameter * 0.05)
+                    .offset(x: discDiameter * 0.028)
+                    .shadow(color: .black.opacity(0.4), radius: 0.5, x: 0.5)
+                // Cue dot.
+                Circle()
+                    .fill(Theme.Palette.hwOrange)
+                    .frame(width: 3, height: 3)
+                    .offset(y: discDiameter * 0.026)
+            }
+            .frame(width: discDiameter * 0.046, height: discDiameter * 0.095)
+            .scaleEffect(dragging ? 1.08 : 1.0)
+            .rotationEffect(armAngle + .degrees(90 + 14))
+            .position(stylus)
+            .animation(ChromeMotion.spring, value: dragging)
 
-            // Pivot base
-            Circle()
-                .fill(Theme.Palette.rowFill)
-                .overlay(Circle().strokeBorder(Theme.Palette.panelHairline, lineWidth: 1))
-                .frame(width: 13, height: 13)
-                .position(pivot)
+            // Pivot base: a raised bearing housing with a center screw.
+            ZStack {
+                Circle()
+                    .fill(
+                        RadialGradient(colors: [Theme.Palette.ctrlLight, Theme.Palette.ctrlDark],
+                                       center: UnitPoint(x: 0.38, y: 0.30),
+                                       startRadius: 0, endRadius: 14)
+                    )
+                    .overlay(Circle().strokeBorder(Theme.Palette.bezelDark, lineWidth: 1))
+                    .innerShadow(Circle(), color: Theme.Palette.insetHi.opacity(0.6),
+                                 lineWidth: 1, blur: 0.8, y: -0.7)
+                Circle()
+                    .strokeBorder(Theme.Palette.insetLo.opacity(0.5), lineWidth: 1)
+                    .frame(width: 12, height: 12)
+                ScrewHead(angle: 58)
+            }
+            .frame(width: 22, height: 22)
+            .shadow(color: .black.opacity(0.4), radius: 1.5, y: 1.5)
+            .position(pivot)
         }
         .frame(width: discDiameter, height: discDiameter)
         // Drop shadow on the platter grows + offsets as the arm lifts.
@@ -777,17 +834,21 @@ struct TurntablePanel: View {
             VUMeter(studio: studio)
                 .frame(height: 74)
                 .frame(maxWidth: .infinity)
+                .padding(3)
+                .insetWell(radius: WindowChrome.inBarHoverRadius + 3)
             indicatorLights
 
             Spacer(minLength: 12)
 
             // Lower cluster — bottom-anchored deck controls.
-            VStack(spacing: 16) {
+            VStack(spacing: 18) {
                 transport
                 elapsedRow
-                knobs
-                abToggle
-                    .frame(maxWidth: .infinity)
+                HStack(alignment: .center, spacing: 0) {
+                    knobs
+                    SlideLever(on: !studio.bypass) { studio.toggleBypass() }
+                        .padding(.leading, 6)
+                }
             }
         }
         .padding(.horizontal, 20)
@@ -796,8 +857,7 @@ struct TurntablePanel: View {
         // below its band so the track block never runs under it.
         .padding(.top, WindowChrome.pillHeight + 12)
         .frame(maxHeight: .infinity, alignment: .top)
-        .dockPanelSurface(radius: WindowChrome.panelRadius)
-        .shadow(color: Theme.Shadow.panel.color, radius: Theme.Shadow.panel.radius, y: Theme.Shadow.panel.y)
+        .faceplate(radius: WindowChrome.panelRadius)
     }
 
     // 1. Track block
@@ -836,8 +896,8 @@ struct TurntablePanel: View {
     // 3. Indicator lights
     private var indicatorLights: some View {
         HStack(spacing: 28) {
-            IndicatorLight(label: "POWER", on: studio.isRunning)
-            IndicatorLight(label: "VINYL", on: !studio.bypass)
+            IndicatorLight(label: "POWER", on: studio.isRunning, color: Theme.Palette.hwGreen)
+            IndicatorLight(label: "VINYL", on: !studio.bypass, color: Theme.Palette.hwOrange)
         }
         .frame(maxWidth: .infinity)
     }
@@ -852,7 +912,7 @@ struct TurntablePanel: View {
             }
             DeckButton(symbol: isPlaying ? "pause.fill" : "play.fill",
                        help: "Play / Pause  Space",
-                       diameter: 54, glyphSize: 20) {
+                       diameter: 54, glyphSize: 20, accentGlyph: true) {
                 model.playPause()
             }
             DeckButton(symbol: "forward.fill", help: "Next  ⌘→",
@@ -902,13 +962,9 @@ struct TurntablePanel: View {
 
     private func knob(_ title: String, help: String,
                       value: Binding<Double>, reset: @escaping () -> Void) -> some View {
-        PhysicalKnob(help: help, value: value, onReset: reset, size: 44, label: title)
+        PhysicalKnob(help: help, value: value, onReset: reset, size: 44,
+                     label: title, printedScale: true)
             .frame(maxWidth: .infinity)
-    }
-
-    // 7. A/B toggle as a labeled glyph button
-    private var abToggle: some View {
-        ABToggle(on: !studio.bypass) { studio.toggleBypass() }
     }
 
     private static func time(_ seconds: Double?) -> String {
@@ -925,6 +981,7 @@ struct TurntablePanel: View {
 struct IndicatorLight: View {
     let label: String
     let on: Bool
+    var color: Color = Theme.Palette.accent
 
     var body: some View {
         VStack(spacing: 5) {
@@ -941,7 +998,7 @@ struct IndicatorLight: View {
             .fill(
                 RadialGradient(
                     gradient: Gradient(colors: on
-                        ? [Theme.Palette.accent, Theme.Palette.accent.darkened(by: 0.45)]
+                        ? [color, color.darkened(by: 0.45)]
                         : [Theme.Palette.lensOff, Theme.Palette.lensOff.darkened(by: 0.3)]),
                     center: UnitPoint(x: 0.4, y: 0.35),
                     startRadius: 0,
@@ -950,7 +1007,7 @@ struct IndicatorLight: View {
             )
             .overlay(Circle().strokeBorder(Theme.Palette.lensRim, lineWidth: 1))
             .frame(width: 8, height: 8)
-            .shadow(color: on ? Theme.Palette.accent.opacity(0.5) : .clear,
+            .shadow(color: on ? color.opacity(0.6) : .clear,
                     radius: on ? 5 : 0)
     }
 }
@@ -1083,10 +1140,10 @@ struct VUMeter: View {
         }
     }
 
-    // Physical plate: rowFill with a 1pt inner shadow ring.
+    // Physical plate: a solid meter face (real faces are printed card).
     private var plate: some View {
         RoundedRectangle(cornerRadius: radius, style: .continuous)
-            .fill(Theme.Palette.rowFill)
+            .fill(Theme.Palette.chipFill)
             .overlay(
                 RoundedRectangle(cornerRadius: radius, style: .continuous)
                     .strokeBorder(Theme.Palette.vuInnerShadow, lineWidth: 1)

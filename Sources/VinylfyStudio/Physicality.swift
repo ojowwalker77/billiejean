@@ -98,9 +98,12 @@ struct DeckButtonStyle: ButtonStyle {
     var diameter: CGFloat
     /// Glyph point size.
     var glyphSize: CGFloat
+    /// Hardware-orange glyph (the one colored key in a cluster).
+    var accentGlyph = false
 
     func makeBody(configuration: Configuration) -> some View {
-        DeckButtonBody(configuration: configuration, diameter: diameter, glyphSize: glyphSize)
+        DeckButtonBody(configuration: configuration, diameter: diameter,
+                       glyphSize: glyphSize, accentGlyph: accentGlyph)
     }
 }
 
@@ -109,80 +112,52 @@ private struct DeckButtonBody: View {
     let configuration: ButtonStyleConfiguration
     let diameter: CGFloat
     let glyphSize: CGFloat
+    var accentGlyph = false
 
     @State private var hovering = false
 
     var body: some View {
         let pressed = configuration.isPressed
-        let bodyColor = pressed ? Theme.Palette.buttonBodyPressed : Theme.Palette.buttonBody
 
         return configuration.label
             .onChange(of: pressed) { _, nowPressed in
                 // Haptic the instant the key goes DOWN, like a real switch.
                 if nowPressed { Haptics.level() }
             }
-            .font(.system(size: glyphSize, weight: .medium))
-            .foregroundStyle(hovering ? Theme.Palette.chromeGlyphHover : Theme.Palette.chromeGlyph)
-            .frame(width: diameter, height: diameter)
-            .background(
-                ZStack {
-                    // Raised body: catch light top-left → body.
-                    Circle()
-                        .fill(
-                            RadialGradient(
-                                gradient: Gradient(colors: [Theme.Palette.buttonHighlight, bodyColor]),
-                                center: UnitPoint(x: 0.36, y: 0.30),
-                                startRadius: 1,
-                                endRadius: diameter * 0.82
-                            )
-                        )
-                    // Inner bottom shadow — the lip that reads as depth.
-                    Circle()
-                        .stroke(Theme.Palette.buttonInnerShadow, lineWidth: 2)
-                        .blur(radius: 2)
-                        .mask(
-                            Circle().fill(
-                                LinearGradient(colors: [.clear, .black],
-                                               startPoint: .center, endPoint: .bottom)
-                            )
-                        )
-                    // 1pt top-edge light, masked to the upper half.
-                    Circle()
-                        .strokeBorder(Theme.Palette.buttonEdgeLight, lineWidth: 1)
-                        .mask(
-                            Circle().fill(
-                                LinearGradient(colors: [.black, .clear],
-                                               startPoint: .top, endPoint: .center)
-                            )
-                        )
-                }
-            )
-            .offset(y: pressed ? 1 : 0)
-            .shadow(color: .black.opacity(0.30),
-                    radius: pressed ? 1.5 : 4,
-                    x: 0, y: pressed ? 0.5 : 2)
+            .font(.system(size: glyphSize, weight: .semibold))
+            .foregroundStyle(glyphColor)
+            .scaleEffect(pressed ? 0.96 : 1)
+            .modifier(SkeuoRaisedCircle(diameter: diameter, pressed: pressed))
             .contentShape(Circle())
             .onHover { hovering = $0 }
             .animation(ChromeMotion.hover, value: hovering)
             .animation(.spring(response: 0.18, dampingFraction: 0.7), value: pressed)
     }
+
+    private var glyphColor: Color {
+        if accentGlyph { return Theme.Palette.hwOrange }
+        return hovering ? Theme.Palette.body : Theme.Palette.printedInk
+    }
 }
 
 /// A transport button that reads as a physical deck key. The press haptic fires
 /// from `DeckButtonStyle` the instant the key sinks; `action` runs on release.
+/// `accentGlyph` marks the primary key with the hardware orange (Braun-style —
+/// exactly one colored control per cluster).
 @available(macOS 14.2, *)
 struct DeckButton: View {
     let symbol: String
     let help: String
     var diameter: CGFloat
     var glyphSize: CGFloat
+    var accentGlyph = false
     var action: () -> Void
 
     var body: some View {
         Button(action: action) {
             Image(systemName: symbol)
         }
-        .buttonStyle(DeckButtonStyle(diameter: diameter, glyphSize: glyphSize))
+        .buttonStyle(DeckButtonStyle(diameter: diameter, glyphSize: glyphSize, accentGlyph: accentGlyph))
         .help(help)
     }
 }
@@ -202,6 +177,8 @@ struct PhysicalKnob: View {
 
     var size: CGFloat = WindowChrome.controlHeight
     var label: String? = nil
+    /// Engrave a tick scale on the faceplate around the knob (playing panel).
+    var printedScale = false
 
     @State private var hovering = false
 
@@ -213,13 +190,16 @@ struct PhysicalKnob: View {
         minAngle + (maxAngle - minAngle) * value.clamped01
     }
 
+    /// Extra canvas so the printed scale fits around the knob.
+    private var frameSize: CGFloat { size + (printedScale ? 18 : 8) }
+
     var body: some View {
         VStack(spacing: 6) {
             knob
             if let label {
                 Text(label)
                     .font(WindowChrome.captionFont)
-                    .foregroundStyle(Theme.Palette.count)
+                    .foregroundStyle(Theme.Palette.printedInk)
                     .lineLimit(1)
             }
         }
@@ -227,41 +207,55 @@ struct PhysicalKnob: View {
 
     private var knob: some View {
         ZStack {
-            // Accent value-arc OUTSIDE the body: radius +4pt, 3pt round-cap line.
-            Circle()
-                .trim(from: 0, to: value.clamped01 * (maxAngle - minAngle) / 360.0)
-                .stroke(Theme.Palette.accent,
-                        style: StrokeStyle(lineWidth: 3, lineCap: .round))
-                .rotationEffect(.degrees(90 + minAngle))
-                .frame(width: size + 8, height: size + 8)
-                .animation(ChromeMotion.hover, value: value)
+            if printedScale {
+                tickScale
+            }
 
-            // Glossy body: catch light top-left → deep body, 1pt inset rim.
-            Circle()
-                .fill(
-                    RadialGradient(
-                        gradient: Gradient(colors: [Theme.Palette.knobHighlight, Theme.Palette.knobBody]),
-                        center: UnitPoint(x: 0.36, y: 0.30),
-                        startRadius: 1,
-                        endRadius: size * 0.78
+            // Machined body: knurled skirt with a domed cap and a painted pointer.
+            ZStack {
+                // Skirt with knurling — tiny radial grip cuts around the edge.
+                Circle()
+                    .fill(
+                        RadialGradient(
+                            gradient: Gradient(colors: [Theme.Palette.ctrlLight, Theme.Palette.ctrlDark]),
+                            center: UnitPoint(x: 0.38, y: 0.30),
+                            startRadius: 1,
+                            endRadius: size * 0.80
+                        )
                     )
-                )
-                .overlay(
-                    Circle().inset(by: 1).stroke(Theme.Palette.knobRim, lineWidth: 1)
-                )
-                .overlay(Circle().fill(hovering ? Theme.Palette.hoverWash : .clear))
-                .frame(width: size, height: size)
-                .shadow(color: .black.opacity(0.18), radius: 12, x: 0, y: 5)
-
-            // Indicator line: 2×9pt, contrasting palette token.
-            Capsule()
-                .fill(Theme.Palette.knobIndicator)
-                .frame(width: 2, height: 9)
-                .offset(y: -(size / 2 - 7))
-                .rotationEffect(.degrees(indicatorAngle))
-                .animation(ChromeMotion.hover, value: value)
+                knurling
+                    .rotationEffect(.degrees(indicatorAngle))
+                // Domed cap — the raised center that catches the room light.
+                Circle()
+                    .fill(
+                        RadialGradient(
+                            gradient: Gradient(colors: [Theme.Palette.ctrlLight, Theme.Palette.ctrlDark]),
+                            center: UnitPoint(x: 0.34, y: 0.26),
+                            startRadius: 0,
+                            endRadius: size * 0.42
+                        )
+                    )
+                    .frame(width: size * 0.68, height: size * 0.68)
+                    .innerShadow(Circle(), color: Theme.Palette.insetHi.opacity(0.7),
+                                 lineWidth: 1, blur: 0.8, y: -0.6)
+                    .shadow(color: .black.opacity(0.25), radius: 1.2, y: 1)
+                // Painted pointer on the cap, turned by the value.
+                Capsule()
+                    .fill(Theme.Palette.body)
+                    .frame(width: 2, height: size * 0.26)
+                    .offset(y: -size * 0.19)
+                    .rotationEffect(.degrees(indicatorAngle))
+                    .animation(ChromeMotion.hover, value: value)
+                Circle().strokeBorder(Theme.Palette.bezelDark, lineWidth: 1)
+                Circle().fill(hovering ? Theme.Palette.hoverWash : .clear)
+            }
+            .frame(width: size, height: size)
+            .innerShadow(Circle(), color: Theme.Palette.insetLo.opacity(0.7),
+                         lineWidth: 1.5, blur: 1.5, x: 0.8, y: 1.5)
+            .shadow(color: .black.opacity(0.45), radius: 1, y: 1)
+            .shadow(color: .black.opacity(0.22), radius: 6, y: 3.5)
         }
-        .frame(width: size + 8, height: size + 8)
+        .frame(width: frameSize, height: frameSize)
         .contentShape(Circle())
         .overlay(
             KnobScrollCatcher(
@@ -282,6 +276,39 @@ struct PhysicalKnob: View {
         .onHover { hovering = $0 }
         .animation(ChromeMotion.hover, value: hovering)
         .help(help)
+    }
+
+    /// Knurling: alternating grip cuts around the skirt (they rotate with the knob).
+    private var knurling: some View {
+        let cuts = size >= 40 ? 36 : 24
+        return ZStack {
+            ForEach(0..<cuts, id: \.self) { i in
+                Capsule()
+                    .fill(i.isMultiple(of: 2)
+                          ? Theme.Palette.insetLo.opacity(0.45)
+                          : Theme.Palette.insetHi.opacity(0.35))
+                    .frame(width: 1, height: size * 0.10)
+                    .offset(y: -size / 2 + size * 0.06)
+                    .rotationEffect(.degrees(Double(i) / Double(cuts) * 360))
+            }
+        }
+        .allowsHitTesting(false)
+    }
+
+    /// Engraved faceplate scale: eleven ticks over the sweep, ends slightly longer.
+    private var tickScale: some View {
+        ZStack {
+            ForEach(0..<11, id: \.self) { i in
+                let t = Double(i) / 10.0
+                let isEnd = i == 0 || i == 10
+                Capsule()
+                    .fill(Theme.Palette.printedInk.opacity(isEnd ? 0.8 : 0.45))
+                    .frame(width: 1, height: isEnd ? 5 : 3)
+                    .offset(y: -(size / 2 + 6))
+                    .rotationEffect(.degrees(minAngle + (maxAngle - minAngle) * t))
+            }
+        }
+        .allowsHitTesting(false)
     }
 
     private static func haptics(old: Double, new: Double) {
