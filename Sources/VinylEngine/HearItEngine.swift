@@ -1,0 +1,901 @@
+@preconcurrency import AVFoundation
+import AudioCapture
+import CoreAudio
+import DSP
+import Foundation
+
+@available(macOS 14.2, *)
+public final class HearItEngine: @unchecked Sendable {
+    public struct Meters: Sendable {
+        public let inputLevels: [Float]
+        public let outputLevels: [Float]
+        public let binsPerSecond: Double
+
+        public init(inputLevels: [Float], outputLevels: [Float], binsPerSecond: Double) {
+            self.inputLevels = inputLevels
+            self.outputLevels = outputLevels
+            self.binsPerSecond = binsPerSecond
+        }
+    }
+
+    public struct Stats: Sendable {
+        public let processed: Int
+        public let queued: Int
+        public let dropped: Int
+        public let underruns: Int
+
+        public init(processed: Int, queued: Int, dropped: Int, underruns: Int = 0) {
+            self.processed = processed
+            self.queued = queued
+            self.dropped = dropped
+            self.underruns = underruns
+        }
+    }
+
+    public var isRunning: Bool {
+        stateLock.withLock { running }
+    }
+
+    public var bypass: Bool {
+        get {
+            processorLock.withLock { currentBypass }
+        }
+        set {
+            processorLock.withLock {
+                currentBypass = newValue
+                processor?.isBypassed = newValue
+            }
+        }
+    }
+
+    public var parameters: VinylParameters {
+        get {
+            processorLock.withLock { currentParameters }
+        }
+        set {
+            processorLock.withLock {
+                currentParameters = newValue
+                processor?.updateParameters(newValue)
+            }
+        }
+    }
+
+    public var statsHandler: (@Sendable (Stats) -> Void)? {
+        get {
+            stateLock.withLock { _statsHandler }
+        }
+        set {
+            stateLock.withLock {
+                _statsHandler = newValue
+            }
+        }
+    }
+
+    public var isExcludingCurrentProcess: Bool {
+        stateLock.withLock { excludingCurrentProcess }
+    }
+
+    private let engine = AVAudioEngine()
+    private let player = AVAudioPlayerNode()
+    private let processingQueue = DispatchQueue(label: "com.vinylfy.hearit.processing", qos: .userInteractive)
+    private let playbackQueue = DispatchQueue(label: "com.vinylfy.hearit.playback", qos: .userInitiated)
+    private let processingQueueKey = DispatchSpecificKey<Void>()
+    private let playbackQueueKey = DispatchSpecificKey<Void>()
+    private let stateLock = NSLock()
+    private let processorLock = NSLock()
+    private let meterLock = NSLock()
+    private let lifecycleLock = NSLock()
+    private let poolLock = NSLock()
+    private let debugLogging: Bool
+
+    private var tap: SystemAudioTap?
+    private var processor: VinylProcessor?
+    private var poolFormat: AVAudioFormat?
+    private var poolSlots: [PoolSlot] = []
+    private var poolGeneration = 0
+    private var debugRecorder: DebugWAVRecorder?
+    private var recordingDirectory: URL?
+    private var currentSampleRate: Double = 0
+    private var currentParameters = VinylParameters()
+    private var currentBypass = false
+
+    private var running = false
+    private var excludingCurrentProcess = false
+    private var scheduledBuffers = 0
+    private var processedBuffers = 0
+    private var droppedBuffers = 0
+    private var underrunCount = 0
+    private var _statsHandler: (@Sendable (Stats) -> Void)?
+
+    private var playerAttached = false
+    private var playbackFormat: AVAudioFormat?
+    private var playbackGeneration = 0
+    private var nextSampleTime: AVAudioFramePosition = -1
+    /// Scheduling lead ahead of the render head (~85ms at 48kHz): the jitter
+    /// budget for the tap -> processing -> playback dispatch hops.
+    private static let leadFrames: AVAudioFramePosition = 4_096
+
+    private var inputMeterRing = MeterRing(capacity: 4_096)
+    private var outputMeterRing = MeterRing(capacity: 4_096)
+    private var meterSampleRate: Double = 0
+
+    public init(debugLogging: Bool = false) {
+        self.debugLogging = debugLogging
+        processingQueue.setSpecific(key: processingQueueKey, value: ())
+        playbackQueue.setSpecific(key: playbackQueueKey, value: ())
+    }
+
+    public func start() throws {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+
+        try markStarting()
+        resetDSPState()
+        resetMeters()
+        resetPool()
+        prepareDebugRecording()
+
+        do {
+            try preparePlayback()
+            let excludedProcesses = Self.currentProcessObjectIDsForExclusionWithRetry()
+            stateLock.withLock {
+                excludingCurrentProcess = !excludedProcesses.isEmpty
+            }
+
+            let tap = SystemAudioTap(
+                excludedProcessObjectIDs: excludedProcesses,
+                debugLogging: debugLogging
+            )
+            stateLock.withLock {
+                self.tap = tap
+            }
+
+            try tap.start { [weak self] buffer, _ in
+                self?.handle(buffer)
+            }
+        } catch {
+            stopUnlocked()
+            throw error
+        }
+    }
+
+    public func stop() {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+
+        stopUnlocked()
+    }
+
+    private func stopUnlocked() {
+        let tapToStop: SystemAudioTap? = stateLock.withLock {
+            running = false
+            let currentTap = tap
+            tap = nil
+            return currentTap
+        }
+
+        tapToStop?.stop()
+        stopPlayback()
+        resetDSPState()
+        closeDebugRecording()
+        resetPool()
+    }
+
+    public func meters(maxBins: Int) -> Meters {
+        meterLock.lock()
+        defer { meterLock.unlock() }
+
+        let clampedMaxBins = max(0, maxBins)
+        return Meters(
+            inputLevels: inputMeterRing.newest(maxBins: clampedMaxBins),
+            outputLevels: outputMeterRing.newest(maxBins: clampedMaxBins),
+            binsPerSecond: meterSampleRate > 0 ? meterSampleRate / Double(MeterRing.binFrameCount) : 0
+        )
+    }
+
+    public func stats() -> Stats {
+        stateLock.withLock {
+            Stats(
+                processed: processedBuffers,
+                queued: scheduledBuffers,
+                dropped: droppedBuffers,
+                underruns: underrunCount
+            )
+        }
+    }
+
+    private func markStarting() throws {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+
+        guard !running else {
+            throw AudioError.alreadyRunning
+        }
+
+        running = true
+        excludingCurrentProcess = false
+        scheduledBuffers = 0
+        processedBuffers = 0
+        droppedBuffers = 0
+        underrunCount = 0
+    }
+
+    private func preparePlayback() throws {
+        var startError: Error?
+        playbackQueue.sync {
+            if !playerAttached {
+                engine.attach(player)
+                playerAttached = true
+            }
+            engine.connect(player, to: engine.mainMixerNode, format: nil)
+            engine.mainMixerNode.outputVolume = 0.85
+            resetPlaybackQueueState()
+
+            do {
+                try engine.start()
+            } catch {
+                startError = error
+            }
+        }
+
+        if let startError {
+            throw startError
+        }
+    }
+
+    private func stopPlayback() {
+        let work = {
+            self.player.stop()
+            self.resetPlaybackQueueState()
+        }
+
+        if DispatchQueue.getSpecific(key: playbackQueueKey) != nil {
+            work()
+        } else {
+            playbackQueue.sync(execute: work)
+        }
+        engine.stop()
+    }
+
+    private func resetPlaybackQueueState() {
+        playbackFormat = nil
+        playbackGeneration &+= 1
+        nextSampleTime = -1
+        stateLock.withLock {
+            scheduledBuffers = 0
+        }
+    }
+
+    private func resetDSPState() {
+        processorLock.withLock {
+            processor = nil
+            currentSampleRate = 0
+        }
+    }
+
+    private func resetMeters() {
+        meterLock.lock()
+        inputMeterRing.reset()
+        outputMeterRing.reset()
+        meterSampleRate = 0
+        meterLock.unlock()
+    }
+
+    private func handle(_ buffer: AVAudioPCMBuffer) {
+        guard let pooled = copyIntoPool(buffer) else {
+            processingQueue.async { [weak self] in
+                self?.incrementDroppedBuffer()
+            }
+            return
+        }
+
+        processingQueue.async { [weak self, pooled] in
+            self?.processPooledBuffer(pooled)
+        }
+    }
+
+    private func processPooledBuffer(_ pooled: PooledAudioBuffer) {
+        defer {
+            releasePoolBuffer(pooled)
+        }
+
+        guard stateLock.withLock({ running }) else {
+            return
+        }
+
+        let buffer = pooled.buffer
+        meterLock.lock()
+        meterSampleRate = buffer.format.sampleRate
+        inputMeterRing.append(buffer)
+        meterLock.unlock()
+
+        debugRecorder?.writeInput(buffer)
+
+        let processed = process(buffer)
+        guard let processed else {
+            incrementDroppedBuffer()
+            return
+        }
+
+        meterLock.lock()
+        outputMeterRing.append(processed)
+        meterLock.unlock()
+
+        let processedCount = stateLock.withLock { () -> Int in
+            processedBuffers += 1
+            return processedBuffers
+        }
+
+        debugRecorder?.writeOutput(processed)
+
+        playbackQueue.async { [weak self, processed] in
+            self?.schedule(processed, processedCount: processedCount)
+        }
+    }
+
+    private func process(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        let sampleRate = buffer.format.sampleRate
+        var didChangeFormat = false
+
+        processorLock.lock()
+        if processor == nil || sampleRate != currentSampleRate {
+            let nextProcessor = VinylProcessor(sampleRate: sampleRate, parameters: currentParameters)
+            nextProcessor.isBypassed = currentBypass
+            processor = nextProcessor
+            currentSampleRate = sampleRate
+            didChangeFormat = true
+        }
+        let processed = processor?.process(buffer)
+        processorLock.unlock()
+
+        if didChangeFormat, debugLogging {
+            print("Tap format: \(Int(sampleRate)) Hz, \(buffer.format.channelCount) channels")
+        }
+
+        return processed
+    }
+
+    private func schedule(_ buffer: AVAudioPCMBuffer, processedCount: Int) {
+        guard stateLock.withLock({ running }) else {
+            return
+        }
+
+        if playbackFormat.map({ !buffer.format.isEqual($0) }) ?? true {
+            player.stop()
+            resetPlaybackQueueState()
+            engine.connect(player, to: engine.mainMixerNode, format: buffer.format)
+            playbackFormat = buffer.format
+        }
+
+        if !player.isPlaying {
+            player.play()
+        }
+
+        // Place every buffer on an explicit sample-time grid a fixed lead ahead of
+        // the render head. Arrival jitter is absorbed by the lead instead of racing
+        // the renderer; a buffer that misses its slot forces a resync (one audible
+        // gap) and counts as a real underrun.
+        let sampleRate = buffer.format.sampleRate
+        var didUnderrun = false
+        if let nodeTime = player.lastRenderTime, nodeTime.isSampleTimeValid,
+           let playerTime = player.playerTime(forNodeTime: nodeTime), playerTime.isSampleTimeValid {
+            let renderHead = playerTime.sampleTime
+            if nextSampleTime < 0 {
+                nextSampleTime = renderHead + Self.leadFrames
+            } else if nextSampleTime <= renderHead {
+                nextSampleTime = renderHead + Self.leadFrames
+                didUnderrun = true
+            }
+        } else if nextSampleTime < 0 {
+            nextSampleTime = Self.leadFrames
+        }
+
+        let when = AVAudioTime(sampleTime: nextSampleTime, atRate: sampleRate)
+        nextSampleTime += AVAudioFramePosition(buffer.frameLength)
+
+        let stats = stateLock.withLock { () -> Stats in
+            scheduledBuffers += 1
+            if didUnderrun {
+                underrunCount += 1
+            }
+            return Stats(
+                processed: processedCount,
+                queued: scheduledBuffers,
+                dropped: droppedBuffers,
+                underruns: underrunCount
+            )
+        }
+
+        let generation = playbackGeneration
+        player.scheduleBuffer(buffer, at: when, completionCallbackType: .dataConsumed) { [weak self] _ in
+            guard let engine = self else {
+                return
+            }
+            engine.playbackQueue.async { [engine] in
+                engine.scheduledBufferCompleted(generation: generation)
+            }
+        }
+
+        if let statsHandler = stateLock.withLock({ _statsHandler }) {
+            statsHandler(stats)
+        }
+    }
+
+    private func scheduledBufferCompleted(generation: Int) {
+        guard generation == playbackGeneration else {
+            return
+        }
+
+        stateLock.withLock {
+            if scheduledBuffers > 0 {
+                scheduledBuffers -= 1
+            }
+        }
+    }
+
+    private func copyIntoPool(_ source: AVAudioPCMBuffer) -> PooledAudioBuffer? {
+        guard source.frameLength <= PoolSlot.frameCapacity else {
+            return nil
+        }
+
+        poolLock.lock()
+
+        if poolFormat.map({ !source.format.isEqual($0) }) ?? true {
+            guard rebuildPool(format: source.format) else {
+                poolLock.unlock()
+                return nil
+            }
+        }
+
+        guard let index = poolSlots.firstIndex(where: { !$0.isInUse }) else {
+            poolLock.unlock()
+            return nil
+        }
+
+        let slot = poolSlots[index]
+        slot.isInUse = true
+        let pooled = PooledAudioBuffer(buffer: slot.buffer, index: index, generation: poolGeneration)
+        poolLock.unlock()
+
+        guard copyAudioData(from: source, to: pooled.buffer) else {
+            releasePoolBuffer(pooled)
+            return nil
+        }
+
+        return pooled
+    }
+
+    private func rebuildPool(format: AVAudioFormat) -> Bool {
+        var nextSlots: [PoolSlot] = []
+        nextSlots.reserveCapacity(PoolSlot.count)
+
+        for _ in 0..<PoolSlot.count {
+            guard let buffer = AVAudioPCMBuffer(
+                pcmFormat: format,
+                frameCapacity: PoolSlot.frameCapacity
+            ) else {
+                return false
+            }
+            nextSlots.append(PoolSlot(buffer: buffer))
+        }
+
+        poolSlots = nextSlots
+        poolFormat = format
+        poolGeneration &+= 1
+        return true
+    }
+
+    private func releasePoolBuffer(_ pooled: PooledAudioBuffer) {
+        poolLock.lock()
+        if pooled.generation == poolGeneration, poolSlots.indices.contains(pooled.index) {
+            poolSlots[pooled.index].isInUse = false
+            poolSlots[pooled.index].buffer.frameLength = 0
+        }
+        poolLock.unlock()
+    }
+
+    private func resetPool() {
+        poolLock.lock()
+        poolSlots.removeAll(keepingCapacity: false)
+        poolFormat = nil
+        poolGeneration &+= 1
+        poolLock.unlock()
+    }
+
+    private func copyAudioData(from source: AVAudioPCMBuffer, to destination: AVAudioPCMBuffer) -> Bool {
+        guard source.format.isEqual(destination.format),
+              source.frameLength <= destination.frameCapacity else {
+            return false
+        }
+
+        destination.frameLength = source.frameLength
+
+        guard let sourceChannels = source.floatChannelData,
+              let destinationChannels = destination.floatChannelData else {
+            destination.frameLength = 0
+            return false
+        }
+
+        let frameCount = Int(source.frameLength)
+        let channelCount = Int(source.format.channelCount)
+        if source.format.isInterleaved {
+            memcpy(
+                destinationChannels[0],
+                sourceChannels[0],
+                frameCount * channelCount * MemoryLayout<Float>.size
+            )
+        } else {
+            for channel in 0..<channelCount {
+                memcpy(
+                    destinationChannels[channel],
+                    sourceChannels[channel],
+                    frameCount * MemoryLayout<Float>.size
+                )
+            }
+        }
+
+        return true
+    }
+
+    private func incrementDroppedBuffer() {
+        stateLock.withLock {
+            droppedBuffers += 1
+        }
+    }
+
+    private func prepareDebugRecording() {
+        let environment = ProcessInfo.processInfo.environment
+        guard let rawDirectory = environment["VINYLFY_RECORD_DIR"], !rawDirectory.isEmpty else {
+            recordingDirectory = nil
+            debugRecorder = nil
+            return
+        }
+
+        let directory = URL(fileURLWithPath: rawDirectory, isDirectory: true)
+        var isDirectory: ObjCBool = false
+        let exists = FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory)
+        guard exists, isDirectory.boolValue, FileManager.default.isWritableFile(atPath: directory.path) else {
+            print("VINYLFY_RECORD_DIR is not a writable directory: \(directory.path)")
+            recordingDirectory = nil
+            debugRecorder = nil
+            return
+        }
+
+        recordingDirectory = directory
+        debugRecorder = DebugWAVRecorder(directory: directory)
+        print("Recording input WAV to \(directory.appendingPathComponent("input.wav").path)")
+        print("Recording output WAV to \(directory.appendingPathComponent("output.wav").path)")
+    }
+
+    private func closeDebugRecording() {
+        let work = {
+            self.debugRecorder?.close()
+            self.debugRecorder = nil
+            self.recordingDirectory = nil
+        }
+
+        if DispatchQueue.getSpecific(key: processingQueueKey) != nil {
+            work()
+        } else {
+            processingQueue.sync(execute: work)
+        }
+    }
+
+    private static func currentProcessObjectIDsForExclusionWithRetry() -> [AudioObjectID] {
+        for _ in 0..<20 {
+            let ids = SystemAudioTap.currentProcessObjectIDsForExclusion()
+            if !ids.isEmpty {
+                return ids
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        return []
+    }
+}
+
+private struct PooledAudioBuffer: @unchecked Sendable {
+    let buffer: AVAudioPCMBuffer
+    let index: Int
+    let generation: Int
+}
+
+private final class PoolSlot {
+    static let count = 16
+    static let frameCapacity: AVAudioFrameCount = 8_192
+
+    let buffer: AVAudioPCMBuffer
+    var isInUse = false
+
+    init(buffer: AVAudioPCMBuffer) {
+        self.buffer = buffer
+    }
+}
+
+private final class DebugWAVRecorder {
+    private enum Stream {
+        case input
+        case output
+
+        var fileDescription: String {
+            switch self {
+            case .input:
+                return "input.wav"
+            case .output:
+                return "output.wav"
+            }
+        }
+    }
+
+    private let inputURL: URL
+    private let outputURL: URL
+    private var inputFile: AVAudioFile?
+    private var outputFile: AVAudioFile?
+    private var inputFileFormat: AVAudioFormat?
+    private var outputFileFormat: AVAudioFormat?
+    private var inputConverter: AVAudioConverter?
+    private var outputConverter: AVAudioConverter?
+    private var warnedInputFormatChange = false
+    private var warnedOutputFormatChange = false
+
+    init(directory: URL) {
+        inputURL = directory.appendingPathComponent("input.wav")
+        outputURL = directory.appendingPathComponent("output.wav")
+    }
+
+    func writeInput(_ buffer: AVAudioPCMBuffer) {
+        write(buffer, stream: .input)
+    }
+
+    func writeOutput(_ buffer: AVAudioPCMBuffer) {
+        write(buffer, stream: .output)
+    }
+
+    func close() {
+        inputFile = nil
+        outputFile = nil
+        inputFileFormat = nil
+        outputFileFormat = nil
+        inputConverter = nil
+        outputConverter = nil
+    }
+
+    private func write(_ buffer: AVAudioPCMBuffer, stream: Stream) {
+        guard let targetFormat = AVAudioFormat(
+            standardFormatWithSampleRate: buffer.format.sampleRate,
+            channels: buffer.format.channelCount
+        ) else {
+            return
+        }
+
+        do {
+            let file = try file(for: stream, targetFormat: targetFormat)
+            guard let converted = convertedBuffer(buffer, to: targetFormat, stream: stream) else {
+                return
+            }
+            try file.write(from: converted)
+        } catch {
+            print("Could not record \(stream.fileDescription): \(error.localizedDescription)")
+        }
+    }
+
+    private func file(for stream: Stream, targetFormat: AVAudioFormat) throws -> AVAudioFile {
+        switch stream {
+        case .input:
+            if let inputFile {
+                if inputFileFormat?.isEqual(targetFormat) == true {
+                    return inputFile
+                }
+                if !warnedInputFormatChange {
+                    print("Input recording skipped after tap format changed.")
+                    warnedInputFormatChange = true
+                }
+                throw AudioError.invalidTapFormat
+            }
+
+            let file = try AVAudioFile(
+                forWriting: inputURL,
+                settings: targetFormat.settings,
+                commonFormat: targetFormat.commonFormat,
+                interleaved: targetFormat.isInterleaved
+            )
+            inputFile = file
+            inputFileFormat = targetFormat
+            return file
+
+        case .output:
+            if let outputFile {
+                if outputFileFormat?.isEqual(targetFormat) == true {
+                    return outputFile
+                }
+                if !warnedOutputFormatChange {
+                    print("Output recording skipped after processed format changed.")
+                    warnedOutputFormatChange = true
+                }
+                throw AudioError.invalidTapFormat
+            }
+
+            let file = try AVAudioFile(
+                forWriting: outputURL,
+                settings: targetFormat.settings,
+                commonFormat: targetFormat.commonFormat,
+                interleaved: targetFormat.isInterleaved
+            )
+            outputFile = file
+            outputFileFormat = targetFormat
+            return file
+        }
+    }
+
+    private func convertedBuffer(
+        _ buffer: AVAudioPCMBuffer,
+        to targetFormat: AVAudioFormat,
+        stream: Stream
+    ) -> AVAudioPCMBuffer? {
+        if buffer.format.isEqual(targetFormat) {
+            return buffer
+        }
+
+        let converter: AVAudioConverter
+        switch stream {
+        case .input:
+            if let inputConverter {
+                converter = inputConverter
+            } else {
+                guard let nextConverter = AVAudioConverter(from: buffer.format, to: targetFormat) else {
+                    return nil
+                }
+                inputConverter = nextConverter
+                converter = nextConverter
+            }
+        case .output:
+            if let outputConverter {
+                converter = outputConverter
+            } else {
+                guard let nextConverter = AVAudioConverter(from: buffer.format, to: targetFormat) else {
+                    return nil
+                }
+                outputConverter = nextConverter
+                converter = nextConverter
+            }
+        }
+
+        let outputCapacity = max(
+            1,
+            AVAudioFrameCount(ceil(Double(buffer.frameLength) * targetFormat.sampleRate / buffer.format.sampleRate)) + 16
+        )
+        guard let output = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: outputCapacity) else {
+            return nil
+        }
+
+        let inputProvider = ConverterInputProvider(buffer: buffer)
+        var conversionError: NSError?
+        let status = converter.convert(to: output, error: &conversionError) { _, inputStatus in
+            if inputProvider.didProvideInput {
+                inputStatus.pointee = .noDataNow
+                return nil
+            }
+            inputProvider.didProvideInput = true
+            inputStatus.pointee = .haveData
+            return inputProvider.buffer
+        }
+
+        if status == .error {
+            if let conversionError {
+                print("Could not convert \(stream.fileDescription) for recording: \(conversionError.localizedDescription)")
+            }
+            return nil
+        }
+
+        return output.frameLength > 0 ? output : nil
+    }
+}
+
+private final class ConverterInputProvider: @unchecked Sendable {
+    let buffer: AVAudioPCMBuffer
+    var didProvideInput = false
+
+    init(buffer: AVAudioPCMBuffer) {
+        self.buffer = buffer
+    }
+}
+
+private struct MeterRing {
+    static let binFrameCount = 256
+
+    private var bins: [Float]
+    private var writeIndex = 0
+    private var count = 0
+    private var partialPeak: Float = 0
+    private var partialFrameCount = 0
+
+    init(capacity: Int) {
+        bins = Array(repeating: 0, count: capacity)
+    }
+
+    mutating func reset() {
+        for index in bins.indices {
+            bins[index] = 0
+        }
+        writeIndex = 0
+        count = 0
+        partialPeak = 0
+        partialFrameCount = 0
+    }
+
+    mutating func append(_ buffer: AVAudioPCMBuffer) {
+        guard let channels = buffer.floatChannelData else {
+            return
+        }
+
+        let frameCount = Int(buffer.frameLength)
+        let channelCount = Int(buffer.format.channelCount)
+        guard frameCount > 0, channelCount > 0 else {
+            return
+        }
+
+        let isInterleaved = buffer.format.isInterleaved
+        let stride = buffer.stride
+        for frame in 0..<frameCount {
+            var peak: Float = 0
+            for channel in 0..<channelCount {
+                peak = max(
+                    peak,
+                    abs(Self.sample(
+                        from: channels,
+                        channel: channel,
+                        frame: frame,
+                        stride: stride,
+                        isInterleaved: isInterleaved
+                    ))
+                )
+            }
+            appendSamplePeak(min(1, peak))
+        }
+    }
+
+    func newest(maxBins: Int) -> [Float] {
+        guard maxBins > 0, count > 0 else {
+            return []
+        }
+
+        let resultCount = min(maxBins, count)
+        let start = (writeIndex - resultCount + bins.count) % bins.count
+        var result: [Float] = []
+        result.reserveCapacity(resultCount)
+
+        for offset in 0..<resultCount {
+            result.append(bins[(start + offset) % bins.count])
+        }
+        return result
+    }
+
+    private mutating func appendSamplePeak(_ peak: Float) {
+        partialPeak = max(partialPeak, peak)
+        partialFrameCount += 1
+
+        if partialFrameCount == Self.binFrameCount {
+            appendBin(partialPeak)
+            partialPeak = 0
+            partialFrameCount = 0
+        }
+    }
+
+    private mutating func appendBin(_ peak: Float) {
+        bins[writeIndex] = peak
+        writeIndex = (writeIndex + 1) % bins.count
+        count = min(count + 1, bins.count)
+    }
+
+    private static func sample(
+        from channels: UnsafePointer<UnsafeMutablePointer<Float>>,
+        channel: Int,
+        frame: Int,
+        stride: Int,
+        isInterleaved: Bool
+    ) -> Float {
+        if isInterleaved {
+            return channels[0][frame * stride + channel]
+        }
+        return channels[channel][frame]
+    }
+}
