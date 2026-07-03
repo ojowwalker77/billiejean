@@ -19,8 +19,8 @@ final class HearItRunner: @unchecked Sendable {
                 let meters = engine?.meters(maxBins: 200)
                 let inPeak = meters?.inputLevels.max() ?? 0
                 let outPeak = meters?.outputLevels.max() ?? 0
-                print(String(format: "processed=%d queued=%d dropped=%d underruns=%d inPeak=%.3f outPeak=%.3f",
-                             stats.processed, stats.queued, stats.dropped, stats.underruns, inPeak, outPeak))
+                print(String(format: "processed=%d queued=%d dropped=%d underruns=%d restarts=%d inPeak=%.3f outPeak=%.3f",
+                             stats.processed, stats.queued, stats.dropped, stats.underruns, stats.restarts, inPeak, outPeak))
             }
         }
         engine.bypass = bypass

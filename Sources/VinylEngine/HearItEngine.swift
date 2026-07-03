@@ -23,12 +23,14 @@ public final class HearItEngine: @unchecked Sendable {
         public let queued: Int
         public let dropped: Int
         public let underruns: Int
+        public let restarts: Int
 
-        public init(processed: Int, queued: Int, dropped: Int, underruns: Int = 0) {
+        public init(processed: Int, queued: Int, dropped: Int, underruns: Int = 0, restarts: Int = 0) {
             self.processed = processed
             self.queued = queued
             self.dropped = dropped
             self.underruns = underruns
+            self.restarts = restarts
         }
     }
 
@@ -79,8 +81,10 @@ public final class HearItEngine: @unchecked Sendable {
     private let player = AVAudioPlayerNode()
     private let processingQueue = DispatchQueue(label: "com.vinylfy.hearit.processing", qos: .userInteractive)
     private let playbackQueue = DispatchQueue(label: "com.vinylfy.hearit.playback", qos: .userInitiated)
+    private let restartQueue = DispatchQueue(label: "com.vinylfy.hearit.restart", qos: .userInitiated)
     private let processingQueueKey = DispatchSpecificKey<Void>()
     private let playbackQueueKey = DispatchSpecificKey<Void>()
+    private let restartQueueKey = DispatchSpecificKey<Void>()
     private let stateLock = NSLock()
     private let processorLock = NSLock()
     private let meterLock = NSLock()
@@ -105,7 +109,15 @@ public final class HearItEngine: @unchecked Sendable {
     private var processedBuffers = 0
     private var droppedBuffers = 0
     private var underrunCount = 0
+    private var restartCount = 0
+    private var pipelineGeneration = 0
     private var _statsHandler: (@Sendable (Stats) -> Void)?
+
+    private var defaultOutputDeviceListener: AudioObjectPropertyListenerBlock?
+    private var engineConfigurationObserver: NSObjectProtocol?
+    private var pendingRestartWorkItem: DispatchWorkItem?
+    private var suppressEngineConfigurationRestart = false
+    private var suppressEngineConfigurationRestartGeneration = 0
 
     private var playerAttached = false
     private var playbackFormat: AVAudioFormat?
@@ -123,6 +135,11 @@ public final class HearItEngine: @unchecked Sendable {
         self.debugLogging = debugLogging
         processingQueue.setSpecific(key: processingQueueKey, value: ())
         playbackQueue.setSpecific(key: playbackQueueKey, value: ())
+        restartQueue.setSpecific(key: restartQueueKey, value: ())
+    }
+
+    deinit {
+        stop()
     }
 
     public func start() throws {
@@ -136,23 +153,8 @@ public final class HearItEngine: @unchecked Sendable {
         prepareDebugRecording()
 
         do {
-            try preparePlayback()
-            let excludedProcesses = Self.currentProcessObjectIDsForExclusionWithRetry()
-            stateLock.withLock {
-                excludingCurrentProcess = !excludedProcesses.isEmpty
-            }
-
-            let tap = SystemAudioTap(
-                excludedProcessObjectIDs: excludedProcesses,
-                debugLogging: debugLogging
-            )
-            stateLock.withLock {
-                self.tap = tap
-            }
-
-            try tap.start { [weak self] buffer, _ in
-                self?.handle(buffer)
-            }
+            try startPipelineResources()
+            try installPipelineObservers()
         } catch {
             stopUnlocked()
             throw error
@@ -167,8 +169,14 @@ public final class HearItEngine: @unchecked Sendable {
     }
 
     private func stopUnlocked() {
+        cancelPendingRestart()
+        removePipelineObservers()
+
         let tapToStop: SystemAudioTap? = stateLock.withLock {
             running = false
+            suppressEngineConfigurationRestart = false
+            suppressEngineConfigurationRestartGeneration &+= 1
+            pipelineGeneration &+= 1
             let currentTap = tap
             tap = nil
             return currentTap
@@ -178,6 +186,205 @@ public final class HearItEngine: @unchecked Sendable {
         stopPlayback()
         resetDSPState()
         closeDebugRecording()
+        resetPool()
+    }
+
+    private enum PipelineRestartReason: String, Sendable {
+        case deviceChange = "device-change"
+        case engineConfig = "engine-config"
+    }
+
+    private func installPipelineObservers() throws {
+        try installDefaultOutputDeviceListener()
+        installEngineConfigurationObserver()
+    }
+
+    private func installDefaultOutputDeviceListener() throws {
+        guard defaultOutputDeviceListener == nil else {
+            return
+        }
+
+        let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.schedulePipelineRestart(reason: .deviceChange)
+        }
+
+        var address = Self.defaultOutputDevicePropertyAddress()
+        let status = AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            restartQueue,
+            listener
+        )
+
+        guard status == noErr else {
+            throw NSError(
+                domain: "com.vinylfy.hearit",
+                code: Int(status),
+                userInfo: [NSLocalizedDescriptionKey: "Could not observe default output device changes."]
+            )
+        }
+
+        defaultOutputDeviceListener = listener
+    }
+
+    private func installEngineConfigurationObserver() {
+        guard engineConfigurationObserver == nil else {
+            return
+        }
+
+        engineConfigurationObserver = NotificationCenter.default.addObserver(
+            forName: NSNotification.Name.AVAudioEngineConfigurationChange,
+            object: engine,
+            queue: nil
+        ) { [weak self] _ in
+            self?.schedulePipelineRestart(reason: .engineConfig)
+        }
+    }
+
+    private func removePipelineObservers() {
+        if let listener = defaultOutputDeviceListener {
+            var address = Self.defaultOutputDevicePropertyAddress()
+            AudioObjectRemovePropertyListenerBlock(
+                AudioObjectID(kAudioObjectSystemObject),
+                &address,
+                restartQueue,
+                listener
+            )
+            defaultOutputDeviceListener = nil
+        }
+
+        if let observer = engineConfigurationObserver {
+            NotificationCenter.default.removeObserver(observer)
+            engineConfigurationObserver = nil
+        }
+    }
+
+    private static func defaultOutputDevicePropertyAddress() -> AudioObjectPropertyAddress {
+        AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+    }
+
+    private func schedulePipelineRestart(reason: PipelineRestartReason) {
+        let schedule: @Sendable () -> Void = { [weak self] in
+            guard let self else { return }
+            if reason == .engineConfig, self.isEngineConfigurationRestartSuppressed() {
+                return
+            }
+            self.pendingRestartWorkItem?.cancel()
+
+            let workItem = DispatchWorkItem { [weak self] in
+                self?.restartPipeline(reason: reason)
+            }
+            self.pendingRestartWorkItem = workItem
+            self.restartQueue.asyncAfter(deadline: .now() + .milliseconds(700), execute: workItem)
+        }
+
+        if DispatchQueue.getSpecific(key: restartQueueKey) != nil {
+            schedule()
+        } else {
+            restartQueue.async(execute: schedule)
+        }
+    }
+
+    private func cancelPendingRestart() {
+        let cancel: @Sendable () -> Void = { [weak self] in
+            self?.pendingRestartWorkItem?.cancel()
+            self?.pendingRestartWorkItem = nil
+        }
+
+        if DispatchQueue.getSpecific(key: restartQueueKey) != nil {
+            cancel()
+        } else {
+            restartQueue.async(execute: cancel)
+        }
+    }
+
+    private func restartPipeline(reason: PipelineRestartReason, attempt: Int = 0) {
+        pendingRestartWorkItem = nil
+
+        lifecycleLock.lock()
+        let isRunning = stateLock.withLock { running }
+        guard isRunning else {
+            lifecycleLock.unlock()
+            return
+        }
+
+        let suppressionGeneration = beginEngineConfigurationRestartSuppression()
+        tearDownPipelineForRestart()
+
+        do {
+            try startPipelineResources()
+            stateLock.withLock {
+                restartCount += 1
+            }
+            lifecycleLock.unlock()
+            clearEngineConfigurationRestartSuppressionSoon(generation: suppressionGeneration)
+
+            if debugLogging {
+                print("pipeline_restarted reason=\(reason.rawValue)")
+            }
+        } catch {
+            tearDownPipelineForRestart()
+            lifecycleLock.unlock()
+            clearEngineConfigurationRestartSuppressionSoon(generation: suppressionGeneration)
+            scheduleRestartRetry(reason: reason, attempt: attempt, error: error)
+        }
+    }
+
+    private func isEngineConfigurationRestartSuppressed() -> Bool {
+        stateLock.withLock { suppressEngineConfigurationRestart }
+    }
+
+    private func beginEngineConfigurationRestartSuppression() -> Int {
+        stateLock.withLock {
+            suppressEngineConfigurationRestart = true
+            suppressEngineConfigurationRestartGeneration &+= 1
+            return suppressEngineConfigurationRestartGeneration
+        }
+    }
+
+    private func clearEngineConfigurationRestartSuppressionSoon(generation: Int) {
+        restartQueue.asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard let self else { return }
+            self.stateLock.withLock {
+                guard self.suppressEngineConfigurationRestartGeneration == generation else {
+                    return
+                }
+                self.suppressEngineConfigurationRestart = false
+            }
+        }
+    }
+
+    private func scheduleRestartRetry(reason: PipelineRestartReason, attempt: Int, error: Error) {
+        guard attempt < 5 else {
+            if debugLogging {
+                print("pipeline_restart_gave_up reason=\(reason.rawValue) error=\(error.localizedDescription)")
+            }
+            return
+        }
+
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.restartPipeline(reason: reason, attempt: attempt + 1)
+        }
+        pendingRestartWorkItem = workItem
+        restartQueue.asyncAfter(deadline: .now() + 1, execute: workItem)
+    }
+
+    private func tearDownPipelineForRestart() {
+        let tapToStop: SystemAudioTap? = stateLock.withLock {
+            let currentTap = tap
+            tap = nil
+            excludingCurrentProcess = false
+            pipelineGeneration &+= 1
+            return currentTap
+        }
+
+        tapToStop?.stop()
+        stopPlayback()
+        resetDSPState()
         resetPool()
     }
 
@@ -199,7 +406,8 @@ public final class HearItEngine: @unchecked Sendable {
                 processed: processedBuffers,
                 queued: scheduledBuffers,
                 dropped: droppedBuffers,
-                underruns: underrunCount
+                underruns: underrunCount,
+                restarts: restartCount
             )
         }
     }
@@ -218,6 +426,38 @@ public final class HearItEngine: @unchecked Sendable {
         processedBuffers = 0
         droppedBuffers = 0
         underrunCount = 0
+        restartCount = 0
+        pipelineGeneration &+= 1
+    }
+
+    private func startPipelineResources() throws {
+        try preparePlayback()
+        let excludedProcesses = Self.currentProcessObjectIDsForExclusionWithRetry()
+        stateLock.withLock {
+            excludingCurrentProcess = !excludedProcesses.isEmpty
+        }
+
+        let tap = SystemAudioTap(
+            excludedProcessObjectIDs: excludedProcesses,
+            debugLogging: debugLogging
+        )
+        stateLock.withLock {
+            self.tap = tap
+        }
+
+        do {
+            try tap.start { [weak self] buffer, _ in
+                self?.handle(buffer)
+            }
+        } catch {
+            stateLock.withLock {
+                if self.tap === tap {
+                    self.tap = nil
+                }
+            }
+            tap.stop()
+            throw error
+        }
     }
 
     private func preparePlayback() throws {
@@ -299,7 +539,7 @@ public final class HearItEngine: @unchecked Sendable {
             releasePoolBuffer(pooled)
         }
 
-        guard stateLock.withLock({ running }) else {
+        guard stateLock.withLock({ running && pipelineGeneration == pooled.pipelineGeneration }) else {
             return
         }
 
@@ -329,7 +569,11 @@ public final class HearItEngine: @unchecked Sendable {
         debugRecorder?.writeOutput(processed)
 
         playbackQueue.async { [weak self, processed] in
-            self?.schedule(processed, processedCount: processedCount)
+            self?.schedule(
+                processed,
+                processedCount: processedCount,
+                pipelineGeneration: pooled.pipelineGeneration
+            )
         }
     }
 
@@ -355,8 +599,12 @@ public final class HearItEngine: @unchecked Sendable {
         return processed
     }
 
-    private func schedule(_ buffer: AVAudioPCMBuffer, processedCount: Int) {
-        guard stateLock.withLock({ running }) else {
+    private func schedule(
+        _ buffer: AVAudioPCMBuffer,
+        processedCount: Int,
+        pipelineGeneration scheduledPipelineGeneration: Int
+    ) {
+        guard stateLock.withLock({ running && pipelineGeneration == scheduledPipelineGeneration }) else {
             return
         }
 
@@ -402,7 +650,8 @@ public final class HearItEngine: @unchecked Sendable {
                 processed: processedCount,
                 queued: scheduledBuffers,
                 dropped: droppedBuffers,
-                underruns: underrunCount
+                underruns: underrunCount,
+                restarts: restartCount
             )
         }
 
@@ -438,6 +687,8 @@ public final class HearItEngine: @unchecked Sendable {
             return nil
         }
 
+        let pipelineGeneration = stateLock.withLock { self.pipelineGeneration }
+
         poolLock.lock()
 
         if poolFormat.map({ !source.format.isEqual($0) }) ?? true {
@@ -454,7 +705,12 @@ public final class HearItEngine: @unchecked Sendable {
 
         let slot = poolSlots[index]
         slot.isInUse = true
-        let pooled = PooledAudioBuffer(buffer: slot.buffer, index: index, generation: poolGeneration)
+        let pooled = PooledAudioBuffer(
+            buffer: slot.buffer,
+            index: index,
+            generation: poolGeneration,
+            pipelineGeneration: pipelineGeneration
+        )
         poolLock.unlock()
 
         guard copyAudioData(from: source, to: pooled.buffer) else {
@@ -597,6 +853,7 @@ private struct PooledAudioBuffer: @unchecked Sendable {
     let buffer: AVAudioPCMBuffer
     let index: Int
     let generation: Int
+    let pipelineGeneration: Int
 }
 
 private final class PoolSlot {
