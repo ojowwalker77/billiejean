@@ -483,8 +483,11 @@ struct PlayerCanvas: View {
                 spinning: studio.isSpinning,
                 cold: studio.bypass
             )
-            // Large tonearm overlapping the platter from the right.
-            BigTonearm(engaged: studio.snapshot?.isPlaying ?? false, discDiameter: recordSize)
+            // The tonearm IS the seek control: it follows playback, and dragging
+            // its headshell scrubs the track.
+            BigTonearm(studio: studio,
+                       onSeek: { model.seek(toSeconds: $0) },
+                       discDiameter: recordSize)
                 .frame(width: recordSize, height: recordSize)
         }
         .frame(width: recordSize, height: recordSize)
@@ -492,39 +495,156 @@ struct PlayerCanvas: View {
     }
 }
 
-// MARK: - Big tonearm (turntable, larger + more detailed than RecordView's)
+// MARK: - Big tonearm — THE seek control
 
-/// A detailed tonearm pivoting from the platter's upper-right: pivot base with a
-/// counterweight behind it, a straight arm, and an angled headshell at the tip.
-/// Rests on the record when playing; lifts ~14° around the pivot when paused.
+/// Fixed pivot/arm geometry for the tonearm, derived so the stylus tip lands on
+/// the record's outer groove (progress 0) and inner groove (progress 1). The arm
+/// rotates about a fixed pivot; `angle(for:)` interpolates linearly by progress.
+private struct TonearmGeometry {
+    let disc: CGFloat
+    let center: CGPoint
+    let pivot: CGPoint
+    let armLength: CGFloat
+    let startAngle: Double   // radians, stylus on the OUTER groove (0:00)
+    let endAngle: Double     // radians, stylus on the INNER groove (end)
+
+    init(disc: CGFloat) {
+        self.disc = disc
+        let c = CGPoint(x: disc / 2, y: disc / 2)
+        self.center = c
+        // Pivot fixed at the platter's upper-right, just off the disc edge — a
+        // real ~9" arm base. This point + the two target radii determine the arm
+        // length and the two swing angles; the sweep lands ~24°.
+        let pivot = CGPoint(x: disc * 0.98, y: disc * 0.06)
+        self.pivot = pivot
+
+        let outerR = disc * 0.47      // outer groove — track start
+        let innerR = disc * 0.24      // inner groove — track end
+        let d = hypot(pivot.x - c.x, pivot.y - c.y)   // pivot→center distance
+
+        // Choose the arm length so both extremes are reachable and the effective
+        // sweep is ~24°. Solve the pivot-centered triangle: the stylus sits at
+        // radius r from disc center and armLength from the pivot; the angle at
+        // the pivot between (pivot→center) and (pivot→stylus) is:
+        //   φ(r) = acos((armLength² + d² − r²) / (2·armLength·d))
+        // Pick armLength = d − innerR·k so the inner groove is comfortably in
+        // reach, then the two φ give the swing.
+        let armLength = d - innerR * 0.35
+        self.armLength = armLength
+
+        func phi(_ r: CGFloat) -> Double {
+            let cosPhi = (armLength * armLength + d * d - r * r) / (2 * armLength * d)
+            return acos(Double(min(1, max(-1, cosPhi))))
+        }
+        // Base direction pivot→center (the arm swings around this line). The
+        // stylus is toward the lower-left of the pivot, so both angles are taken
+        // on the same side.
+        let baseAngle = Double(atan2(c.y - pivot.y, c.x - pivot.x))
+        // Outer groove is the wider angle from the pivot→center line; inner is
+        // tighter. Swing the arm on the clockwise (screen: +) side.
+        self.startAngle = baseAngle + phi(outerR)   // outer groove, 0:00
+        self.endAngle = baseAngle + phi(innerR)      // inner groove, end
+    }
+
+    /// Arm angle (radians) at playback progress 0…1 — linear interpolation.
+    func angle(for progress: Double) -> Double {
+        let t = min(1, max(0, progress))
+        return startAngle + (endAngle - startAngle) * t
+    }
+
+    /// Stylus tip position for a given arm angle.
+    func stylus(atAngle a: Double) -> CGPoint {
+        CGPoint(x: pivot.x + cos(a) * Double(armLength),
+                y: pivot.y + sin(a) * Double(armLength))
+    }
+
+    /// Inverse: map a raw arm angle to progress 0…1, clamped to the swing range.
+    func progress(forAngle a: Double) -> Double {
+        let span = endAngle - startAngle
+        guard abs(span) > 1e-6 else { return 0 }
+        return min(1, max(0, (a - startAngle) / span))
+    }
+}
+
+/// The tonearm: pivots about its fixed base, follows playback continuously
+/// (extrapolated between 2s polls via a `TimelineView`), and is the SEEK control
+/// — dragging its headshell lifts the arm, shows a floating time chip, and on
+/// release commits one `seek`, settling back onto the record with the signature
+/// spring. There is no progress bar; this arm IS the progress indicator.
 @available(macOS 14.2, *)
 struct BigTonearm: View {
-    var engaged: Bool
+    var studio: StudioViewModel
+    var onSeek: (Double) -> Void
     var discDiameter: CGFloat
 
+    @State private var clock = PlaybackClock()
+    /// While dragging: the target progress 0…1 the stylus is being dragged to.
+    @State private var dragProgress: Double?
+
+    private var isPlaying: Bool { studio.snapshot?.isPlaying ?? false }
+    private var duration: Double { studio.durationSeconds ?? 0 }
+
     var body: some View {
-        let center = CGPoint(x: discDiameter / 2, y: discDiameter / 2)
-        // Pivot sits at the platter's upper-right, just inside the panel edge.
-        let pivot = CGPoint(x: discDiameter * 0.94, y: discDiameter * 0.10)
-        let seat = discDiameter * 0.36
-        // Head rests around the record's 1–2 o'clock outer third.
-        let headPoint = CGPoint(
-            x: center.x + cos(.pi / 3.4) * seat,
-            y: center.y - sin(.pi / 3.4) * seat
-        )
-        let armAngle = Angle.radians(atan2(headPoint.y - pivot.y, headPoint.x - pivot.x))
-        // Counterweight lies behind the pivot, opposite the head.
+        let geo = TonearmGeometry(disc: discDiameter)
+
+        return TimelineView(.animation) { timeline in
+            let now = timeline.date
+            // Feed the clock every tick (cheap; only re-anchors on real change).
+            let _ = clock.ingest(position: studio.positionSeconds,
+                                  duration: studio.durationSeconds,
+                                  isPlaying: isPlaying)
+
+            // The arm angle: the drag target while scrubbing, else the smoothed
+            // live playback progress (continuous between 2s polls, poll-snap free;
+            // playback-follow is suppressed during a drag).
+            let shownProgress = dragProgress ?? clock.smoothProgress(at: now)
+            let angle = geo.angle(for: shownProgress)
+            let dragging = dragProgress != nil
+
+            ZStack {
+                arm(geo: geo, angle: angle, dragging: dragging)
+                    .allowsHitTesting(false)
+
+                // Generous 48pt circular hit area riding the headshell — the ONLY
+                // draggable target, so the record surface stays untouched.
+                Circle()
+                    .fill(.clear)
+                    .frame(width: 48, height: 48)
+                    .contentShape(Circle())
+                    .position(geo.stylus(atAngle: angle))
+                    .gesture(dragGesture(geo: geo))
+
+                if dragging {
+                    timeChip(geo: geo, angle: angle)
+                }
+            }
+            .frame(width: discDiameter, height: discDiameter)
+        }
+        .frame(width: discDiameter, height: discDiameter)
+    }
+
+    // MARK: Arm rendering
+
+    @ViewBuilder
+    private func arm(geo: TonearmGeometry, angle: Double, dragging: Bool) -> some View {
+        let stylus = geo.stylus(atAngle: angle)
+        let pivot = geo.pivot
+        let armAngle = Angle.radians(atan2(stylus.y - pivot.y, stylus.x - pivot.x))
+        // Counterweight stub behind the pivot, opposite the head.
         let backLen = discDiameter * 0.12
         let backPoint = CGPoint(
             x: pivot.x - cos(armAngle.radians) * backLen,
             y: pivot.y - sin(armAngle.radians) * backLen
         )
+        // Lifted (dragging) → the arm is off the record: shadow grows + offsets,
+        // headshell scales up, the stylus glow disappears.
+        let lift: CGFloat = dragging ? 1 : 0
 
-        return ZStack {
-            // Arm (pivot → head)
+        ZStack {
+            // Arm (pivot → stylus)
             Path { p in
                 p.move(to: pivot)
-                p.addLine(to: headPoint)
+                p.addLine(to: stylus)
             }
             .stroke(Theme.Palette.body, style: StrokeStyle(lineWidth: 2, lineCap: .round))
 
@@ -539,32 +659,98 @@ struct BigTonearm: View {
                 .frame(width: discDiameter * 0.06, height: discDiameter * 0.06)
                 .position(backPoint)
 
+            // Stylus contact glow — present only while the needle is ON the record.
+            Circle()
+                .fill(Theme.Palette.accent)
+                .frame(width: 8, height: 8)
+                .blur(radius: 3)
+                .opacity(dragging ? 0 : (isPlaying ? 0.7 : 0.35))
+                .position(stylus)
+                .animation(.easeOut(duration: 0.25), value: dragging)
+
             // Angled headshell at the tip
             RoundedRectangle(cornerRadius: 3, style: .continuous)
                 .fill(Theme.Palette.body)
-                .frame(width: discDiameter * 0.035, height: discDiameter * 0.075)
+                .frame(width: discDiameter * 0.04, height: discDiameter * 0.085)
                 .overlay(
                     RoundedRectangle(cornerRadius: 2, style: .continuous)
                         .fill(Theme.Palette.chromeGlyphHover.opacity(0.25))
-                        .frame(width: discDiameter * 0.015, height: discDiameter * 0.025)
-                        .offset(y: -discDiameter * 0.015)
+                        .frame(width: discDiameter * 0.016, height: discDiameter * 0.028)
+                        .offset(y: -discDiameter * 0.016)
                 )
-                .rotationEffect(armAngle + .degrees(90 + 14))   // angled headshell
-                .position(headPoint)
+                .scaleEffect(dragging ? 1.06 : 1.0)
+                .rotationEffect(armAngle + .degrees(90 + 14))
+                .position(stylus)
+                .animation(ChromeMotion.spring, value: dragging)
 
             // Pivot base
             Circle()
                 .fill(Theme.Palette.rowFill)
                 .overlay(Circle().strokeBorder(Theme.Palette.panelHairline, lineWidth: 1))
-                .frame(width: 12, height: 12)
+                .frame(width: 13, height: 13)
                 .position(pivot)
         }
         .frame(width: discDiameter, height: discDiameter)
-        .shadow(color: .black.opacity(0.2), radius: 2, y: 1)
-        .rotationEffect(.degrees(engaged ? 0 : -14),
-                        anchor: UnitPoint(x: 0.94, y: 0.10))
-        .animation(ChromeMotion.spring, value: engaged)
-        .allowsHitTesting(false)
+        // Drop shadow on the platter grows + offsets as the arm lifts.
+        .shadow(color: .black.opacity(dragging ? 0.32 : 0.20),
+                radius: 2 + lift * 5, y: 1 + lift * 4)
+        .animation(ChromeMotion.spring, value: dragging)
+    }
+
+    // MARK: Floating time chip (solid surface — rule 10)
+
+    @ViewBuilder
+    private func timeChip(geo: TonearmGeometry, angle: Double) -> some View {
+        let stylus = geo.stylus(atAngle: angle)
+        let target = (dragProgress ?? 0) * duration
+        Text(Self.time(target))
+            .font(WindowChrome.labelFont.monospacedDigit())
+            .foregroundStyle(Theme.Palette.body)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(Theme.Palette.chipFill)               // SOLID (never translucent)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .strokeBorder(Theme.Palette.panelHairline, lineWidth: 1)
+                    )
+                    .shadow(color: .black.opacity(0.25), radius: 6, y: 3)
+            )
+            .fixedSize()
+            // Float just above the headshell, clamped inside the platter.
+            .position(x: min(discDiameter - 30, max(30, stylus.x)),
+                      y: max(16, stylus.y - 30))
+            .allowsHitTesting(false)
+    }
+
+    // MARK: Drag-to-seek
+
+    private func dragGesture(geo: TonearmGeometry) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { g in
+                // Pointer → angle around the pivot → clamped progress.
+                let a = atan2(g.location.y - geo.pivot.y, g.location.x - geo.pivot.x)
+                dragProgress = geo.progress(forAngle: Double(a))
+            }
+            .onEnded { _ in
+                let target = dragProgress
+                if let target, duration > 0 {
+                    // Anchor the smoothed follow at the release position so the
+                    // arm settles there (signature spring) instead of snapping to
+                    // the now-stale poll; commit the seek once, with a haptic.
+                    clock.resetSmoothed(to: target)
+                    Haptics.level()
+                    onSeek(target * duration)
+                }
+                withAnimation(ChromeMotion.spring) { dragProgress = nil }
+            }
+    }
+
+    private static func time(_ seconds: Double?) -> String {
+        guard let seconds, seconds.isFinite, seconds >= 0 else { return "0:00" }
+        let total = Int(seconds.rounded())
+        return String(format: "%d:%02d", total / 60, total % 60)
     }
 }
 
@@ -580,22 +766,32 @@ struct TurntablePanel: View {
     private var studio: StudioViewModel { model.studio }
     private var isPlaying: Bool { studio.snapshot?.isPlaying ?? false }
 
+    /// Live clock for the elapsed readout — same extrapolation as the tonearm.
+    @State private var clock = PlaybackClock()
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        // Deck faceplate: identity up top, VU + lights, then the whole control
+        // cluster anchored to the BOTTOM so the panel reads dense, not hollow.
+        VStack(alignment: .leading, spacing: 16) {
             trackBlock
             VUMeter(studio: studio)
-                .frame(width: 120, height: 64)
+                .frame(height: 74)
                 .frame(maxWidth: .infinity)
             indicatorLights
-            Spacer(minLength: 8)
-            transport
-            seek
-            knobs
-            abToggle
-                .frame(maxWidth: .infinity)
+
+            Spacer(minLength: 12)
+
+            // Lower cluster — bottom-anchored deck controls.
+            VStack(spacing: 16) {
+                transport
+                elapsedRow
+                knobs
+                abToggle
+                    .frame(maxWidth: .infinity)
+            }
         }
         .padding(.horizontal, 20)
-        .padding(.bottom, 20)
+        .padding(.bottom, 22)
         // The presence pill floats over the panel's top-right; start the content
         // below its band so the track block never runs under it.
         .padding(.top, WindowChrome.pillHeight + 12)
@@ -646,49 +842,49 @@ struct TurntablePanel: View {
         .frame(maxWidth: .infinity)
     }
 
-    // 4. Transport
+    // 4. Transport — real 3D deck keys.
     private var transport: some View {
-        HStack(spacing: WindowChrome.itemSpacing) {
+        HStack(spacing: 20) {
             Spacer(minLength: 0)
-            ChromeIconButton(symbol: "backward.fill", help: "Previous  ⌘←") {
+            DeckButton(symbol: "backward.fill", help: "Previous  ⌘←",
+                       diameter: 44, glyphSize: 15) {
                 model.previousTrack()
             }
-            ChromeIconButton(symbol: isPlaying ? "pause.fill" : "play.fill",
-                             help: "Play / Pause  Space",
-                             diameter: WindowChrome.deckControlHeight) {
+            DeckButton(symbol: isPlaying ? "pause.fill" : "play.fill",
+                       help: "Play / Pause  Space",
+                       diameter: 54, glyphSize: 20) {
                 model.playPause()
             }
-            ChromeIconButton(symbol: "forward.fill", help: "Next  ⌘→") {
+            DeckButton(symbol: "forward.fill", help: "Next  ⌘→",
+                       diameter: 44, glyphSize: 15) {
                 model.nextTrack()
             }
             Spacer(minLength: 0)
         }
     }
 
-    // 5. Seek
-    private var seek: some View {
-        HStack(spacing: 8) {
-            Text(Self.time(studio.positionSeconds))
-                .font(WindowChrome.labelFont.monospacedDigit())
-                .foregroundStyle(Theme.Palette.chromeText)
-                .frame(width: 40, alignment: .trailing)
-            GeometryReader { geo in
-                SeekSlider(
-                    position: studio.positionSeconds,
-                    duration: studio.durationSeconds,
-                    onSeek: { model.seek(toSeconds: $0) },
-                    width: geo.size.width
-                )
+    // 5. Elapsed / total — small monospaced text (the tonearm IS the progress bar).
+    //    Elapsed is live via the same extrapolation the tonearm uses.
+    private var elapsedRow: some View {
+        TimelineView(.periodic(from: .now, by: 0.5)) { timeline in
+            let _ = clock.ingest(position: studio.positionSeconds,
+                                 duration: studio.durationSeconds,
+                                 isPlaying: isPlaying)
+            let elapsed = clock.position(at: timeline.date)
+            HStack {
+                Text(Self.time(elapsed))
+                    .font(WindowChrome.labelFont.monospacedDigit())
+                    .foregroundStyle(Theme.Palette.chromeText)
+                Spacer(minLength: 0)
+                Text(Self.time(studio.durationSeconds))
+                    .font(WindowChrome.labelFont.monospacedDigit())
+                    .foregroundStyle(Theme.Palette.chromeText)
             }
-            .frame(height: WindowChrome.controlHeight)
-            Text(Self.time(studio.durationSeconds))
-                .font(WindowChrome.labelFont.monospacedDigit())
-                .foregroundStyle(Theme.Palette.chromeText)
-                .frame(width: 40, alignment: .leading)
         }
+        .frame(height: 16)
     }
 
-    // 6. Three physical knobs
+    // 6. Three physical knobs (44pt).
     private var knobs: some View {
         HStack(spacing: 0) {
             knob("Noise", help: "Noise — scroll to adjust, double-click to reset",
@@ -706,7 +902,7 @@ struct TurntablePanel: View {
 
     private func knob(_ title: String, help: String,
                       value: Binding<Double>, reset: @escaping () -> Void) -> some View {
-        MiniKnob(title: title, help: help, value: value, onReset: reset, size: 40, label: title)
+        PhysicalKnob(help: help, value: value, onReset: reset, size: 44, label: title)
             .frame(maxWidth: .infinity)
     }
 
@@ -722,21 +918,40 @@ struct TurntablePanel: View {
     }
 }
 
-/// A small indicator dot + caption.
+/// A physical indicator lens + caption. ON: a lit 8pt lens — radial gradient
+/// (bright accent core → darkened accent edge), 1pt dark rim, and an outer glow.
+/// OFF: a dark unlit lens (surface0 core, same rim), never a flat gray dot.
 @available(macOS 14.2, *)
 struct IndicatorLight: View {
     let label: String
     let on: Bool
+
     var body: some View {
-        VStack(spacing: 4) {
-            Circle()
-                .fill(on ? Theme.Palette.accent : Theme.Palette.chromeGlyphDim)
-                .frame(width: 6, height: 6)
+        VStack(spacing: 5) {
+            lens
             Text(label)
                 .font(WindowChrome.microFont)
                 .foregroundStyle(Theme.Palette.count)
         }
         .animation(ChromeMotion.hover, value: on)
+    }
+
+    private var lens: some View {
+        Circle()
+            .fill(
+                RadialGradient(
+                    gradient: Gradient(colors: on
+                        ? [Theme.Palette.accent, Theme.Palette.accent.darkened(by: 0.45)]
+                        : [Theme.Palette.lensOff, Theme.Palette.lensOff.darkened(by: 0.3)]),
+                    center: UnitPoint(x: 0.4, y: 0.35),
+                    startRadius: 0,
+                    endRadius: 5
+                )
+            )
+            .overlay(Circle().strokeBorder(Theme.Palette.lensRim, lineWidth: 1))
+            .frame(width: 8, height: 8)
+            .shadow(color: on ? Theme.Palette.accent.opacity(0.5) : .clear,
+                    radius: on ? 5 : 0)
     }
 }
 
@@ -787,79 +1002,129 @@ struct VUMeter: View {
     /// mutate the same instance — @State must never mutate during render.
     @State private var smoother = MeterSmoother()
 
+    private let radius = WindowChrome.inBarHoverRadius
+
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1.0 / 20.0)) { _ in
-            // Sample + smooth the live output level once per tick.
+            // Sample + smooth the live output level once per tick (asymmetric).
             let level = smoother.advance(toward: Double(studio.outputLevel()).clamped01)
-            Canvas { ctx, size in
-                let w = size.width
-                let h = size.height
-                let pivot = CGPoint(x: w / 2, y: h - 6)
-                let radius = min(w / 2 - 8, h - 12)
-
-                // Arc scale (−45°…+45°, measured from straight up).
-                let start = Angle.degrees(-135)
-                let end = Angle.degrees(-45)
-                var scale = Path()
-                scale.addArc(center: pivot, radius: radius,
-                             startAngle: start, endAngle: end, clockwise: false)
-                ctx.stroke(scale, with: .color(Theme.Palette.count),
-                           style: StrokeStyle(lineWidth: 1))
-
-                // Red zone at the top of the scale (last ~22%).
-                var red = Path()
-                red.addArc(center: pivot, radius: radius,
-                           startAngle: .degrees(-45 - 90 * 0.22), endAngle: end, clockwise: false)
-                ctx.stroke(red, with: .color(Theme.Palette.tint(0)),
-                           style: StrokeStyle(lineWidth: 2))
-
-                // Tick marks along the scale.
-                let ticks = 9
-                for i in 0..<ticks {
-                    let t = Double(i) / Double(ticks - 1)
-                    let a = Angle.degrees(-135 + 90 * t).radians
-                    let inner = radius - 4
-                    let p1 = CGPoint(x: pivot.x + cos(a) * inner, y: pivot.y + sin(a) * inner)
-                    let p2 = CGPoint(x: pivot.x + cos(a) * radius, y: pivot.y + sin(a) * radius)
-                    var tick = Path()
-                    tick.move(to: p1)
-                    tick.addLine(to: p2)
-                    ctx.stroke(tick, with: .color(Theme.Palette.chromeText),
-                               style: StrokeStyle(lineWidth: 1))
-                }
-
-                // Needle: 0…1 → −45°…+45° from vertical (i.e. −135°…−45° in canvas).
-                let needleAngle = Angle.degrees(-135 + 90 * level).radians
-                let needleLen = radius - 2
-                let tip = CGPoint(x: pivot.x + cos(needleAngle) * needleLen,
-                                  y: pivot.y + sin(needleAngle) * needleLen)
-                var needle = Path()
-                needle.move(to: pivot)
-                needle.addLine(to: tip)
-                ctx.stroke(needle, with: .color(Theme.Palette.body),
-                           style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
-            }
-            .background(
-                RoundedRectangle(cornerRadius: WindowChrome.inBarHoverRadius, style: .continuous)
-                    .fill(Theme.Palette.rowFill)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: WindowChrome.inBarHoverRadius, style: .continuous)
-                            .strokeBorder(Theme.Palette.panelHairline, lineWidth: 1)
-                    )
-            )
+            face(level: level)
         }
+    }
+
+    private func face(level: Double) -> some View {
+        Canvas { ctx, size in
+            let w = size.width
+            let h = size.height
+            let pivot = CGPoint(x: w / 2, y: h - 8)
+            let r = min(w / 2 - 10, h - 14)
+
+            let start = Angle.degrees(-135)
+            let end = Angle.degrees(-45)
+
+            // Arc scale.
+            var scale = Path()
+            scale.addArc(center: pivot, radius: r,
+                         startAngle: start, endAngle: end, clockwise: false)
+            ctx.stroke(scale, with: .color(Theme.Palette.count),
+                       style: StrokeStyle(lineWidth: 1))
+
+            // Red zone (last ~22% of the sweep).
+            var red = Path()
+            red.addArc(center: pivot, radius: r,
+                       startAngle: .degrees(-45 - 90 * 0.22), endAngle: end, clockwise: false)
+            ctx.stroke(red, with: .color(Theme.Palette.tint(0)),
+                       style: StrokeStyle(lineWidth: 2))
+
+            // Major + minor tick marks.
+            let majors = 5
+            let minorsPer = 2
+            let totalSteps = (majors - 1) * (minorsPer + 1)
+            for i in 0...totalSteps {
+                let t = Double(i) / Double(totalSteps)
+                let a = Angle.degrees(-135 + 90 * t).radians
+                let isMajor = i % (minorsPer + 1) == 0
+                let len: CGFloat = isMajor ? 6 : 3
+                let inner = r - len
+                let p1 = CGPoint(x: pivot.x + cos(a) * inner, y: pivot.y + sin(a) * inner)
+                let p2 = CGPoint(x: pivot.x + cos(a) * r, y: pivot.y + sin(a) * r)
+                var tick = Path()
+                tick.move(to: p1)
+                tick.addLine(to: p2)
+                ctx.stroke(tick, with: .color(Theme.Palette.chromeText),
+                           style: StrokeStyle(lineWidth: isMajor ? 1.5 : 1))
+            }
+
+            // Needle: 0…1 → −135°…−45° in canvas space.
+            let needleAngle = Angle.degrees(-135 + 90 * level).radians
+            let needleLen = r - 2
+            let tip = CGPoint(x: pivot.x + cos(needleAngle) * needleLen,
+                              y: pivot.y + sin(needleAngle) * needleLen)
+            var needle = Path()
+            needle.move(to: pivot)
+            needle.addLine(to: tip)
+            ctx.stroke(needle, with: .color(Theme.Palette.body),
+                       style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
+
+            // Pivot screw: 5pt dark circle + 1pt light dot slightly off-center.
+            let screw = CGRect(x: pivot.x - 2.5, y: pivot.y - 2.5, width: 5, height: 5)
+            ctx.fill(Path(ellipseIn: screw), with: .color(Theme.Palette.knobBody))
+            let dot = CGRect(x: pivot.x - 1.4, y: pivot.y - 1.6, width: 1.2, height: 1.2)
+            ctx.fill(Path(ellipseIn: dot), with: .color(Theme.Palette.knobHighlight))
+        }
+        .background(plate)
+        .overlay(sheen)
+        .overlay(alignment: .bottomTrailing) {
+            Text("VU")
+                .font(WindowChrome.microFont)
+                .foregroundStyle(Theme.Palette.count)
+                .padding(.trailing, 7)
+                .padding(.bottom, 5)
+        }
+    }
+
+    // Physical plate: rowFill with a 1pt inner shadow ring.
+    private var plate: some View {
+        RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .fill(Theme.Palette.rowFill)
+            .overlay(
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .strokeBorder(Theme.Palette.vuInnerShadow, lineWidth: 1)
+                    .blur(radius: 1)
+                    .mask(RoundedRectangle(cornerRadius: radius, style: .continuous))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .strokeBorder(Theme.Palette.panelHairline, lineWidth: 1)
+            )
+    }
+
+    // Diagonal glass-sheen streak (non-interactive), top-left → center.
+    private var sheen: some View {
+        RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .fill(
+                LinearGradient(colors: [Theme.Palette.vuGlassSheen, .clear],
+                               startPoint: .topLeading, endPoint: .center)
+            )
+            .allowsHitTesting(false)
     }
 }
 
-/// Exponential-approach smoothing for the VU needle. A class so the 20 Hz
-/// TimelineView redraws mutate one shared instance (the InertialSpinner pattern)
-/// instead of writing @State during a view update.
+/// Asymmetric exponential smoothing for the VU needle: fast attack (τ≈0.10s),
+/// slow release (τ≈0.45s), at the 20 Hz poll rate. A class so the TimelineView
+/// redraws mutate one shared instance instead of writing @State during a redraw.
 final class MeterSmoother {
     private var value: Double = 0
 
+    // Per-tick coefficients for dt = 1/20s: α = 1 − exp(−dt/τ).
+    // attack τ = 0.10 → α ≈ 0.393 ; release τ = 0.45 → α ≈ 0.105.
+    private static let attack = 0.393
+    private static let release = 0.105
+
     /// One smoothing step toward `target`; returns the new needle position 0…1.
     func advance(toward target: Double) -> Double {
-        value += (target - value) * 0.3
+        let a = target > value ? Self.attack : Self.release
+        value += (target - value) * a
         value = value.clamped01
         return value
     }

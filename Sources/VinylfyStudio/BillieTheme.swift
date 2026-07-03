@@ -50,6 +50,20 @@ enum Flavor: String, CaseIterable, Identifiable {
     }
 }
 
+extension NSColor {
+    /// Blend toward black by `amount` (0…1) in sRGB — for pressed-state darkening.
+    func darkened(by amount: Double) -> NSColor {
+        let c = usingColorSpace(.sRGB) ?? self
+        let t = CGFloat(min(1, max(0, amount)))
+        return NSColor(
+            srgbRed: c.redComponent * (1 - t),
+            green: c.greenComponent * (1 - t),
+            blue: c.blueComponent * (1 - t),
+            alpha: c.alphaComponent
+        )
+    }
+}
+
 private func ns(_ hex: UInt32) -> NSColor {
     NSColor(
         srgbRed: CGFloat((hex >> 16) & 0xFF) / 255.0,
@@ -184,6 +198,33 @@ extension Theme {
 
         // Content
         static var labelChipFill: Color { c(f.isDark ? f.surface0 : f.mantle) }
+
+        // Physical objects (3D deck faceplate): raised-button, knob, VU, lenses.
+        // All computed from the active flavor so light themes get light materials.
+
+        // Raised transport button: radial gradient body + edge light + sink shadow.
+        static var buttonHighlight: Color { c(f.surface2) }          // top-left catch light
+        static var buttonBody: Color { c(f.surface0) }               // body
+        static var buttonBodyPressed: Color { c(f.surface0.darkened(by: 0.08)) }
+        static var buttonEdgeLight: Color { c(f.text, 0.09) }        // 1pt top rim (8–10%)
+        static var buttonInnerShadow: Color { .black.opacity(f.isDark ? 0.55 : 0.22) }
+
+        // Physical knob (glossy-black recipe, palette-driven so light = light material).
+        static var knobHighlight: Color { c(f.surface2) }            // radial catch light
+        static var knobBody: Color { c(f.isDark ? f.crust : f.surface0) }  // deep body
+        static var knobRim: Color { c(f.overlay0) }                  // 1pt inset rim
+        static var knobIndicator: Color { c(f.isDark ? f.text : f.base) }  // contrasting line
+
+        // Indicator lenses.
+        static var lensRim: Color { c(f.crust) }
+        static var lensOff: Color { c(f.surface0) }
+
+        // VU face detail.
+        static var vuGlassSheen: Color { c(f.text, 0.04) }
+        static var vuInnerShadow: Color { .black.opacity(f.isDark ? 0.40 : 0.15) }
+
+        // Solid time-chip surface for the tonearm seek (rule 10 — never translucent).
+        static var chipFill: Color { c(f.isDark ? f.surface0 : f.mantle) }
 
         // A tint slot by index (user colors are slot indexes, resolved at draw).
         static func tint(_ index: Int) -> Color {

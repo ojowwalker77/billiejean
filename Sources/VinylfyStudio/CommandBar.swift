@@ -77,15 +77,15 @@ struct CommandBar: View {
                 studio.toggleBypass()
             }
 
-            MiniKnob(title: "Noise", help: "Noise — scroll to adjust, double-click to reset",
-                     value: Binding(get: { studio.noise }, set: { studio.noise = $0 }),
-                     onReset: studio.resetNoise)
-            MiniKnob(title: "Main", help: "Main — scroll to adjust, double-click to reset",
-                     value: Binding(get: { studio.main }, set: { studio.main = $0 }),
-                     onReset: studio.resetMain)
-            MiniKnob(title: "Volume", help: "Volume — scroll to adjust, double-click to reset",
-                     value: Binding(get: { studio.volume }, set: { studio.volume = $0 }),
-                     onReset: studio.resetVolume)
+            PhysicalKnob(help: "Noise — scroll to adjust, double-click to reset",
+                         value: Binding(get: { studio.noise }, set: { studio.noise = $0 }),
+                         onReset: studio.resetNoise, size: 34)
+            PhysicalKnob(help: "Main — scroll to adjust, double-click to reset",
+                         value: Binding(get: { studio.main }, set: { studio.main = $0 }),
+                         onReset: studio.resetMain, size: 34)
+            PhysicalKnob(help: "Volume — scroll to adjust, double-click to reset",
+                         value: Binding(get: { studio.volume }, set: { studio.volume = $0 }),
+                         onReset: studio.resetVolume, size: 34)
         }
     }
 
