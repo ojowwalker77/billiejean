@@ -56,12 +56,15 @@ struct MainWindowView: View {
                     .padding(.leading, WindowChrome.trafficLightInset)
                     .zIndex(60)
 
-                // Layer: top-right presence pill
-                presencePill
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-                    .padding(.top, WindowChrome.edgeInset)
-                    .padding(.trailing, WindowChrome.edgeInset)
-                    .zIndex(50)
+                // Layer: top-right presence pill — never floats over the
+                // instrument (hidden in the player; the deck owns its canvas).
+                if !isPlayer {
+                    presencePill
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                        .padding(.top, WindowChrome.edgeInset)
+                        .padding(.trailing, WindowChrome.edgeInset)
+                        .zIndex(50)
+                }
 
                 // Layer: bottom command bar — NOT in player (the turntable is the instrument).
                 if !isPlayer {
@@ -85,6 +88,9 @@ struct MainWindowView: View {
             }
             .frame(width: geo.size.width, height: geo.size.height)
         }
+        // The transparent titlebar must not push chrome down — pills sit at
+        // exactly edgeInset from the REAL window top.
+        .ignoresSafeArea()
         .onAppear { model.loadPlaylistsIfNeeded() }
         .onChange(of: model.state) { _, _ in
             // The content rebuilds on transition; re-layout the traffic lights
@@ -462,20 +468,24 @@ struct PlayerCanvas: View {
     }
 
     var body: some View {
-        // The panel runs the canvas height minus edge insets (V5); the platter
-        // centers in the remaining ~62%.
-        HStack(spacing: WindowChrome.edgeInset) {
+        // ONE deck: platter and control section mounted on a single plinth
+        // (the Technics grammar — one black slab carries everything).
+        HStack(spacing: 0) {
             platter
                 .frame(maxWidth: .infinity)
 
             TurntablePanel(model: model)
                 .frame(width: panelWidth)
         }
+        .faceplate(radius: WindowChrome.panelRadius)
         .padding(WindowChrome.edgeInset)
     }
 
     private var platter: some View {
         ZStack {
+            // The platter under the record: a machined disc with strobe dots
+            // around its rim, showing beyond the vinyl's edge.
+            PlatterView(diameter: recordSize + 26, spinning: studio.isSpinning)
             PlayerRecord(
                 diameter: recordSize,
                 artwork: artwork,
@@ -490,8 +500,58 @@ struct PlayerCanvas: View {
                        discDiameter: recordSize)
                 .frame(width: recordSize, height: recordSize)
         }
-        .frame(width: recordSize, height: recordSize)
+        .frame(width: recordSize + 26, height: recordSize + 26)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// The metal platter the record sits on: a dark machined disc whose rim carries
+/// strobe dots (they spin with the platter, like the real thing).
+@available(macOS 14.2, *)
+struct PlatterView: View {
+    let diameter: CGFloat
+    let spinning: Bool
+
+    @State private var spinner = InertialSpinner()
+
+    var body: some View {
+        TimelineView(.animation) { context in
+            let angle = spinner.angle(at: context.date, spinning: spinning)
+            ZStack {
+                Circle()
+                    .fill(
+                        RadialGradient(
+                            gradient: Gradient(stops: [
+                                .init(color: Theme.Palette.leverBottom, location: 0.0),
+                                .init(color: Theme.Palette.leverTop, location: 0.94),
+                                .init(color: Theme.Palette.leverBottom, location: 1.0),
+                            ]),
+                            center: .center, startRadius: 0, endRadius: diameter / 2
+                        )
+                    )
+                    .overlay(Circle().strokeBorder(Theme.Palette.bezelDark, lineWidth: 1))
+                // Strobe dots around the rim, rotating with the platter.
+                strobeDots
+                    .rotationEffect(.degrees(angle))
+            }
+            .frame(width: diameter, height: diameter)
+            .shadow(color: .black.opacity(0.5), radius: 10, y: 5)
+        }
+        .frame(width: diameter, height: diameter)
+        .allowsHitTesting(false)
+    }
+
+    private var strobeDots: some View {
+        let count = 72
+        return ZStack {
+            ForEach(0..<count, id: \.self) { i in
+                Circle()
+                    .fill(Theme.Palette.insetHi.opacity(0.55))
+                    .frame(width: 2, height: 2)
+                    .offset(y: -diameter / 2 + 5)
+                    .rotationEffect(.degrees(Double(i) / Double(count) * 360))
+            }
+        }
     }
 }
 
@@ -853,11 +913,17 @@ struct TurntablePanel: View {
         }
         .padding(.horizontal, 20)
         .padding(.bottom, 22)
-        // The presence pill floats over the panel's top-right; start the content
-        // below its band so the track block never runs under it.
-        .padding(.top, WindowChrome.pillHeight + 12)
+        .padding(.top, 24)
         .frame(maxHeight: .infinity, alignment: .top)
-        .faceplate(radius: WindowChrome.panelRadius)
+        // Mounted on the shared plinth: a machined seam separates the control
+        // section from the platter area (no separate panel surface).
+        .overlay(alignment: .leading) {
+            HStack(spacing: 0) {
+                Rectangle().fill(Theme.Palette.insetLo.opacity(0.7)).frame(width: 1)
+                Rectangle().fill(Theme.Palette.faceEdgeLight).frame(width: 1)
+            }
+            .padding(.vertical, 14)
+        }
     }
 
     // 1. Track block

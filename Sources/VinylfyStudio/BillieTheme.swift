@@ -236,12 +236,14 @@ extension Theme {
         static var faceWell: Color {
             f.isDark ? c(f.base).mixed(with: c(f.surface0), by: 0.4) : c(f.surface1)
         }
-        static var ctrlLight: Color { f.isDark ? c(f.surface2) : c(f.mantle) }
-        static var ctrlDark: Color {
-            f.isDark ? c(f.surface0).darkened(by: 0.18) : c(f.surface2)
+        static var ctrlLight: Color {
+            f.isDark ? c(f.surface2).mixed(with: .white, by: 0.10) : c(f.mantle)
         }
-        static var bezelDark: Color { .black.opacity(f.isDark ? 0.55 : 0.30) }
-        static var insetHi: Color { .white.opacity(f.isDark ? 0.22 : 0.90) }
+        static var ctrlDark: Color {
+            f.isDark ? c(f.surface0).darkened(by: 0.25) : c(f.surface2)
+        }
+        static var bezelDark: Color { .black.opacity(f.isDark ? 0.60 : 0.30) }
+        static var insetHi: Color { .white.opacity(f.isDark ? 0.34 : 0.90) }
         static var insetLo: Color { .black.opacity(f.isDark ? 0.60 : 0.30) }
         static var printedInk: Color { c(f.subtext0) }
         static var leverTop: Color { f.isDark ? c(f.surface2) : c(f.overlay1) }

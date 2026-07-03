@@ -59,6 +59,9 @@ extension View {
 struct SkeuoRaisedCircle: ViewModifier {
     var diameter: CGFloat
     var pressed: Bool
+    /// Draw a recessed mounting well behind the control (deck keys sit in
+    /// machined recesses — this is what separates "3D" from "gray circle").
+    var mounted = true
 
     func body(content: Content) -> some View {
         let face = LinearGradient(
@@ -72,6 +75,25 @@ struct SkeuoRaisedCircle: ViewModifier {
             .frame(width: diameter, height: diameter)
             .background(
                 ZStack {
+                    if mounted {
+                        // The recess the key sits in: darker well, shadow from
+                        // above, a faint lip light at its bottom edge.
+                        Circle()
+                            .fill(Theme.Palette.faceWell)
+                            .frame(width: diameter + 10, height: diameter + 10)
+                            .innerShadow(Circle(), color: Theme.Palette.insetLo,
+                                         lineWidth: 2.5, blur: 2.5, y: 2)
+                            .overlay(
+                                Circle().strokeBorder(Theme.Palette.faceEdgeLight, lineWidth: 1)
+                                    .mask(
+                                        Circle().fill(
+                                            LinearGradient(colors: [.clear, .black],
+                                                           startPoint: .center, endPoint: .bottom)
+                                        )
+                                    )
+                                    .frame(width: diameter + 10, height: diameter + 10)
+                            )
+                    }
                     Circle().fill(face)
                     if pressed {
                         // Sunk: dark floods from above, faint light pools below.
@@ -255,7 +277,7 @@ extension View {
 @available(macOS 14.2, *)
 struct ScrewHead: View {
     var angle: Double = 0
-    private let d: CGFloat = 7
+    var d: CGFloat = 10
 
     var body: some View {
         Circle()
