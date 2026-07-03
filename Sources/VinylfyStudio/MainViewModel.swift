@@ -3,10 +3,11 @@ import SwiftUI
 import AppKit
 import NowPlaying
 
-/// The canvas has two states: a wall of vinyl discs (LIBRARY) and one big
-/// spinning record (PLAYER).
+/// The canvas has three states: a wall of playlist sleeves (LIBRARY), a wall of
+/// track sleeves for one playlist (SONG GRID), and one big turntable (PLAYER).
 enum CanvasState: Equatable {
     case library
+    case songGrid(playlistID: String)
     case player(playlistID: String)
 }
 
@@ -37,6 +38,20 @@ final class MainViewModel {
     /// Playlists whose artwork fetch is in flight (avoid duplicate requests).
     private var artworkInFlight: Set<String> = []
 
+    // MARK: - Song grid (tracks of one playlist)
+
+    /// Tracks per playlist id, replaced whenever a song grid opens.
+    private(set) var tracks: [String: [MusicTrack]] = [:]
+    /// Playlists whose track fetch is in flight.
+    private var tracksInFlight: Set<String> = []
+    /// The last playlist whose song grid was shown — the player's back path.
+    private(set) var lastSongGridPlaylistID: String?
+
+    /// Per-track artwork + dominant color, keyed by track id.
+    private(set) var trackArtwork: [String: NSImage] = [:]
+    private(set) var trackDominant: [String: Color] = [:]
+    private var trackArtworkInFlight: Set<String> = []
+
     // MARK: - Transient error toast
 
     private(set) var toast: (symbol: String, message: String)?
@@ -44,15 +59,26 @@ final class MainViewModel {
 
     // MARK: - Derived
 
-    /// The playlist currently playing (PLAYER state), if any.
+    /// The playlist id bound to the current non-library state (songGrid or player).
+    var currentPlaylistID: String? {
+        switch state {
+        case .library: return nil
+        case .songGrid(let id), .player(let id): return id
+        }
+    }
+
+    /// The playlist bound to the current non-library state, if resolvable.
     var currentPlaylist: MusicPlaylist? {
-        guard case .player(let id) = state else { return nil }
+        guard let id = currentPlaylistID else { return nil }
         return playlists.first { $0.id == id }
     }
 
     var currentPlaylistName: String {
         currentPlaylist?.name ?? "Now Playing"
     }
+
+    /// Tracks for the current song grid (empty until fetched).
+    func tracks(for id: String) -> [MusicTrack] { tracks[id] ?? [] }
 
     // MARK: - Library loading
 
@@ -110,9 +136,61 @@ final class MainViewModel {
     func artworkImage(for id: String) -> NSImage? { artwork[id] }
     func dominantColor(for id: String) -> Color? { dominant[id] }
 
+    // MARK: - Lazy track artwork
+
+    func loadTrackArtwork(_ track: MusicTrack, inPlaylist playlistID: String) {
+        let id = track.id
+        guard trackArtwork[id] == nil, !trackArtworkInFlight.contains(id) else { return }
+        trackArtworkInFlight.insert(id)
+        music.fetchArtwork(forTrack: id, inPlaylist: playlistID) { [weak self] data in
+            Task { @MainActor in
+                guard let self else { return }
+                self.trackArtworkInFlight.remove(id)
+                guard let data, let image = NSImage(data: data) else { return }
+                self.trackArtwork[id] = image
+                if let rgb = ArtworkColor.dominant(from: data) {
+                    self.trackDominant[id] = Color(.sRGB, red: rgb.red, green: rgb.green, blue: rgb.blue)
+                }
+            }
+        }
+    }
+
+    func trackArtworkImage(for id: String) -> NSImage? { trackArtwork[id] }
+    func trackDominantColor(for id: String) -> Color? { trackDominant[id] }
+
+    // MARK: - Navigation flow
+
+    /// Open a playlist's SONG GRID: transition, then fetch its tracks.
+    func openSongGrid(_ playlist: MusicPlaylist) {
+        let id = playlist.id
+        lastSongGridPlaylistID = id
+        withAnimation(ChromeMotion.spring) {
+            state = .songGrid(playlistID: id)
+        }
+        fetchTracksIfNeeded(id)
+    }
+
+    private func fetchTracksIfNeeded(_ id: String) {
+        guard tracks[id] == nil, !tracksInFlight.contains(id) else { return }
+        tracksInFlight.insert(id)
+        music.fetchTracks(forPlaylist: id) { [weak self] result in
+            Task { @MainActor in
+                guard let self else { return }
+                self.tracksInFlight.remove(id)
+                switch result {
+                case .success(let list):
+                    self.tracks[id] = list
+                case .failure:
+                    self.tracks[id] = []
+                    self.showToast(symbol: "exclamationmark.triangle", message: "Couldn't load tracks")
+                }
+            }
+        }
+    }
+
     // MARK: - Playback flow
 
-    /// Play a playlist and transition to the PLAYER state.
+    /// Play a whole playlist and transition to the PLAYER state.
     func play(_ playlist: MusicPlaylist) {
         music.playPlaylist(id: playlist.id, shuffle: false)
         withAnimation(ChromeMotion.spring) {
@@ -120,9 +198,35 @@ final class MainViewModel {
         }
     }
 
+    /// Play a single track within a playlist and transition to PLAYER.
+    func playTrack(_ track: MusicTrack, inPlaylist playlistID: String) {
+        music.playTrack(id: track.id, inPlaylist: playlistID)
+        withAnimation(ChromeMotion.spring) {
+            state = .player(playlistID: playlistID)
+        }
+    }
+
     func backToLibrary() {
         withAnimation(ChromeMotion.spring) {
             state = .library
+        }
+    }
+
+    /// Back from the player: to the current playlist's SONG GRID if we have one,
+    /// else the library. Song grid backs to the library.
+    func back() {
+        switch state {
+        case .library:
+            break
+        case .songGrid:
+            backToLibrary()
+        case .player(let id):
+            let target = lastSongGridPlaylistID ?? id
+            if let playlist = playlists.first(where: { $0.id == target }) {
+                openSongGrid(playlist)
+            } else {
+                backToLibrary()
+            }
         }
     }
 

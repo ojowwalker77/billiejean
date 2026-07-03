@@ -113,6 +113,13 @@ final class MainWindowController: NSObject, NSWindowDelegate {
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.applyThemeAndRebuild() }
         }
+        // After a canvas-state transition the content rebuilds; re-layout the
+        // traffic lights so they stay on the control-row centerline.
+        NotificationCenter.default.addObserver(
+            forName: .billieRelayoutChrome, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.layoutButtons() }
+        }
     }
 
     var isVisible: Bool { window?.isVisible ?? false }

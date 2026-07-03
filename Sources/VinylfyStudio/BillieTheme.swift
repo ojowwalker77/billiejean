@@ -236,6 +236,14 @@ enum WindowChrome {
 
     // Corner badge font
     static let badgeFont: Font = .system(size: 8, weight: .bold)
+
+    // Secondary text scales (grid subtitles, knob captions, indicator labels)
+    static let sublabelFont: Font = .system(size: 11, weight: .regular)
+    static let captionFont: Font = .system(size: 10, weight: .regular)
+    static let microFont: Font = .system(size: 8, weight: .medium)
+
+    /// The turntable's hero play/pause control — the one sanctioned larger control.
+    static let deckControlHeight: CGFloat = 44
 }
 
 // MARK: - Signature motion

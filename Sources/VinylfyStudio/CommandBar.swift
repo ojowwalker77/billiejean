@@ -70,8 +70,8 @@ struct CommandBar: View {
 
     private var vinylCluster: some View {
         HStack(spacing: WindowChrome.itemSpacing) {
-            // A/B toggle: accent glyph when VINYL active (bypass == false).
-            ChromeIconButton(symbol: studio.bypass ? "a.circle" : "a.circle.fill",
+            // A/B toggle: accent GLYPH when VINYL active (no fill, §9 rule 4).
+            ChromeIconButton(symbol: "waveform",
                              help: studio.bypass ? "Original — tap for Vinyl" : "Vinyl — tap for Original",
                              active: !studio.bypass) {
                 studio.toggleBypass()

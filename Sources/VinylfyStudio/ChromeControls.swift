@@ -4,13 +4,15 @@ import AppKit
 // MARK: - Icon button (the workhorse)
 
 /// 34×34 plain button; SF Symbol at iconFont; Circle hover wash; no fill for
-/// active — the accent-tinted glyph IS the active signal.
+/// active — the accent-tinted glyph IS the active signal. `diameter` is grid-
+/// token-derived; the turntable's hero play/pause passes `deckControlHeight`.
 @available(macOS 14.2, *)
 struct ChromeIconButton: View {
     let symbol: String
     let help: String
     var active = false
     var disabled = false
+    var diameter: CGFloat = WindowChrome.controlHeight
     var action: () -> Void
 
     @State private var hovering = false
@@ -20,7 +22,7 @@ struct ChromeIconButton: View {
             Image(systemName: symbol)
                 .font(WindowChrome.iconFont)
                 .foregroundStyle(foreground)
-                .frame(width: WindowChrome.controlHeight, height: WindowChrome.controlHeight)
+                .frame(width: diameter, height: diameter)
                 .background(Circle().fill(hovering && !disabled ? Theme.Palette.hoverWash : .clear))
                 .contentShape(Circle())
         }
@@ -64,11 +66,12 @@ struct BarDivider: View {
     }
 }
 
-// MARK: - Mini knob (compact circular knob with value arc)
+// MARK: - Mini knob (PHYSICAL compact knob)
 
-/// A 34pt circular knob with a value arc, scroll-to-adjust (reusing the
-/// ScrollWheelCatcher grammar from KnobView), and double-click reset. Drives a
-/// StudioViewModel macro. Grammar matches ChromeIconButton (hover wash, help, haptics).
+/// A physical circular knob: filled body + hairline rim, an indicator line at the
+/// value angle, and a thin accent value-arc riding outside the rim. Scroll to
+/// adjust, double-click to reset, haptic detents. Parameterized size (34 in the
+/// bar, 40 in the turntable panel); optional label rendered below.
 @available(macOS 14.2, *)
 struct MiniKnob: View {
     let title: String
@@ -76,43 +79,54 @@ struct MiniKnob: View {
     @Binding var value: Double
     let onReset: () -> Void
 
+    var size: CGFloat = WindowChrome.controlHeight   // 34
+    var label: String? = nil
+
     @State private var hovering = false
 
-    private let size = WindowChrome.controlHeight   // 34
     private let minAngle: Double = -135
     private let maxAngle: Double = 135
     private static let detentStep = 0.05
 
-    private var sweep: Double { (maxAngle - minAngle) * value.clamped01 }
+    private var indicatorAngle: Double {
+        minAngle + (maxAngle - minAngle) * value.clamped01
+    }
 
     var body: some View {
+        VStack(spacing: 6) {
+            knob
+            if let label {
+                Text(label)
+                    .font(WindowChrome.captionFont)
+                    .foregroundStyle(Theme.Palette.count)
+                    .lineLimit(1)
+            }
+        }
+    }
+
+    private var knob: some View {
         ZStack {
+            // Physical body: filled + hairline rim, hover wash on top.
             Circle()
-                .fill(hovering ? Theme.Palette.hoverWash : .clear)
+                .fill(Theme.Palette.rowFill)
+                .overlay(Circle().strokeBorder(Theme.Palette.panelHairline, lineWidth: 1))
+                .overlay(Circle().fill(hovering ? Theme.Palette.hoverWash : .clear))
 
-            // Track arc
+            // Accent value-arc riding just outside the rim.
             Circle()
-                .trim(from: 0, to: (maxAngle - minAngle) / 360.0)
-                .stroke(Theme.Palette.chromeDivider,
-                        style: StrokeStyle(lineWidth: 2, lineCap: .round))
-                .rotationEffect(.degrees(90 + minAngle))
-                .padding(5)
-
-            // Value arc (accent)
-            Circle()
-                .trim(from: 0, to: sweep / 360.0)
+                .trim(from: 0, to: value.clamped01 * (maxAngle - minAngle) / 360.0)
                 .stroke(Theme.Palette.accent,
                         style: StrokeStyle(lineWidth: 2, lineCap: .round))
                 .rotationEffect(.degrees(90 + minAngle))
-                .padding(5)
+                .padding(-2)
                 .animation(ChromeMotion.hover, value: value)
 
-            // Center glyph tick
+            // Indicator line at the value angle.
             Capsule()
                 .fill(hovering ? Theme.Palette.chromeGlyphHover : Theme.Palette.chromeGlyph)
                 .frame(width: 1.5, height: 5)
-                .offset(y: -(size / 2 - 8))
-                .rotationEffect(.degrees(minAngle + sweep))
+                .offset(y: -(size / 2 - 6))
+                .rotationEffect(.degrees(indicatorAngle))
                 .animation(ChromeMotion.hover, value: value)
         }
         .frame(width: size, height: size)

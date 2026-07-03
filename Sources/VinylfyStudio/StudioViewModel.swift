@@ -223,4 +223,14 @@ final class StudioViewModel {
 
     var positionSeconds: Double? { snapshot?.positionSeconds }
     var durationSeconds: Double? { snapshot?.durationSeconds }
+
+    // MARK: - Live output level (VU meter)
+
+    /// The current output level (0…1), the max of the newest few meter bins.
+    /// Poll this at ~20Hz (via TimelineView) to drive the turntable's VU needle.
+    /// This is the engine's only exposed meter surface for the UI.
+    func outputLevel() -> Float {
+        let bins = engine.meters(maxBins: 4).outputLevels
+        return bins.max() ?? 0
+    }
 }
