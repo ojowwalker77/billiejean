@@ -55,7 +55,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "VinylfyHearIt",
-            dependencies: ["AudioCapture", "DSP", "VinylEngine"],
+            dependencies: ["AudioCapture", "DSP", "VinylEngine", "NowPlaying"],
             linkerSettings: [
                 .linkedFramework("AVFoundation"),
                 .linkedFramework("CoreAudio"),

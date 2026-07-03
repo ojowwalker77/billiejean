@@ -10,6 +10,7 @@ public final class NowPlayingService: @unchecked Sendable {
     private struct TrackMetadata {
         let title: String
         let artist: String
+        let genre: String?
         let isPlaying: Bool
         let positionSeconds: Double?
         let durationSeconds: Double?
@@ -35,10 +36,11 @@ public final class NowPlayingService: @unchecked Sendable {
                     set currentTrack to current track
                     set trackName to name of currentTrack
                     set trackArtist to artist of currentTrack
+                    set trackGenre to genre of currentTrack
                     set trackPosition to player position
                     set trackDuration to duration of currentTrack
                     set trackPlaying to (player state is playing)
-                    return {trackName as text, trackArtist as text, trackPlaying, trackPosition, trackDuration}
+                    return {trackName as text, trackArtist as text, trackGenre as text, trackPlaying, trackPosition, trackDuration}
                 end tell
                 """
             case .musicArtwork:
@@ -175,6 +177,7 @@ public final class NowPlayingService: @unchecked Sendable {
         return NowPlayingSnapshot(
             title: metadata.title,
             artist: metadata.artist,
+            genre: metadata.genre,
             isPlaying: metadata.isPlaying,
             positionSeconds: metadata.positionSeconds,
             durationSeconds: metadata.durationSeconds,
@@ -193,22 +196,26 @@ public final class NowPlayingService: @unchecked Sendable {
             return nil
         }
 
-        let isPlaying = descriptor.atIndex(3)?.booleanValue ?? false
-        let positionSeconds = descriptor.atIndex(4)?.optionalDouble
-        var durationSeconds = descriptor.atIndex(5)?.optionalDouble
-
         switch kind {
         case .musicMetadata:
+            guard descriptor.numberOfItems >= 6 else {
+                return nil
+            }
+
             return TrackMetadata(
                 title: title,
                 artist: artist,
-                isPlaying: isPlaying,
-                positionSeconds: positionSeconds,
-                durationSeconds: durationSeconds,
+                genre: descriptor.atIndex(3)?.stringValue?.nilIfEmpty,
+                isPlaying: descriptor.atIndex(4)?.booleanValue ?? false,
+                positionSeconds: descriptor.atIndex(5)?.optionalDouble,
+                durationSeconds: descriptor.atIndex(6)?.optionalDouble,
                 source: .music,
                 artworkURL: nil
             )
         case .spotifyMetadata:
+            let isPlaying = descriptor.atIndex(3)?.booleanValue ?? false
+            let positionSeconds = descriptor.atIndex(4)?.optionalDouble
+            var durationSeconds = descriptor.atIndex(5)?.optionalDouble
             if let duration = durationSeconds, duration > 10_000 {
                 durationSeconds = duration / 1_000
             }
@@ -216,6 +223,7 @@ public final class NowPlayingService: @unchecked Sendable {
             return TrackMetadata(
                 title: title,
                 artist: artist,
+                genre: nil,
                 isPlaying: isPlaying,
                 positionSeconds: positionSeconds,
                 durationSeconds: durationSeconds,

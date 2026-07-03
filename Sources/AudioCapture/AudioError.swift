@@ -11,6 +11,7 @@ public enum AudioError: Error, LocalizedError, Sendable {
     case aggregateDeviceCreationFailed(OSStatus)
     case invalidTapFormat
     case unsupportedPlatform
+    case targetProcessNotFound(String)
     case alreadyRunning
     case notRunning
     case noAudioCaptured
@@ -38,6 +39,8 @@ public enum AudioError: Error, LocalizedError, Sendable {
             return "Invalid audio tap format."
         case .unsupportedPlatform:
             return "Vinylfy requires macOS 14.2 or later."
+        case .targetProcessNotFound(let bundleIdentifier):
+            return "Target audio process not found for bundle identifier \(bundleIdentifier)."
         case .alreadyRunning:
             return "Audio capture is already running."
         case .notRunning:

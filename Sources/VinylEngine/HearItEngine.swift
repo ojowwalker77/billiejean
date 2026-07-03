@@ -1,4 +1,5 @@
 @preconcurrency import AVFoundation
+import AppKit
 import AudioCapture
 import CoreAudio
 import DSP
@@ -6,6 +7,11 @@ import Foundation
 
 @available(macOS 14.2, *)
 public final class HearItEngine: @unchecked Sendable {
+    public enum TapTarget: Sendable, Equatable {
+        case systemWide
+        case bundle(String)
+    }
+
     public struct Meters: Sendable {
         public let inputLevels: [Float]
         public let outputLevels: [Float]
@@ -77,6 +83,24 @@ public final class HearItEngine: @unchecked Sendable {
         stateLock.withLock { excludingCurrentProcess }
     }
 
+    public var tapTarget: TapTarget {
+        get {
+            stateLock.withLock { currentTapTarget }
+        }
+        set {
+            let shouldRestart = stateLock.withLock { () -> Bool in
+                guard currentTapTarget != newValue else {
+                    return false
+                }
+                currentTapTarget = newValue
+                return running
+            }
+            if shouldRestart {
+                schedulePipelineRestart(reason: .targetApp)
+            }
+        }
+    }
+
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
     private let processingQueue = DispatchQueue(label: "com.vinylfy.hearit.processing", qos: .userInteractive)
@@ -102,6 +126,7 @@ public final class HearItEngine: @unchecked Sendable {
     private var currentSampleRate: Double = 0
     private var currentParameters = VinylParameters()
     private var currentBypass = false
+    private var currentTapTarget: TapTarget = .systemWide
 
     private var running = false
     private var excludingCurrentProcess = false
@@ -115,6 +140,8 @@ public final class HearItEngine: @unchecked Sendable {
 
     private var defaultOutputDeviceListener: AudioObjectPropertyListenerBlock?
     private var engineConfigurationObserver: NSObjectProtocol?
+    private var targetLaunchObserver: NSObjectProtocol?
+    private var targetTerminateObserver: NSObjectProtocol?
     private var pendingRestartWorkItem: DispatchWorkItem?
     private var suppressEngineConfigurationRestart = false
     private var suppressEngineConfigurationRestartGeneration = 0
@@ -192,11 +219,13 @@ public final class HearItEngine: @unchecked Sendable {
     private enum PipelineRestartReason: String, Sendable {
         case deviceChange = "device-change"
         case engineConfig = "engine-config"
+        case targetApp = "target-app"
     }
 
     private func installPipelineObservers() throws {
         try installDefaultOutputDeviceListener()
         installEngineConfigurationObserver()
+        installTargetApplicationObservers()
     }
 
     private func installDefaultOutputDeviceListener() throws {
@@ -241,6 +270,30 @@ public final class HearItEngine: @unchecked Sendable {
         }
     }
 
+    private func installTargetApplicationObservers() {
+        let notificationCenter = NSWorkspace.shared.notificationCenter
+
+        if targetLaunchObserver == nil {
+            targetLaunchObserver = notificationCenter.addObserver(
+                forName: NSWorkspace.didLaunchApplicationNotification,
+                object: nil,
+                queue: nil
+            ) { [weak self] notification in
+                self?.handleTargetApplicationNotification(notification)
+            }
+        }
+
+        if targetTerminateObserver == nil {
+            targetTerminateObserver = notificationCenter.addObserver(
+                forName: NSWorkspace.didTerminateApplicationNotification,
+                object: nil,
+                queue: nil
+            ) { [weak self] notification in
+                self?.handleTargetApplicationNotification(notification)
+            }
+        }
+    }
+
     private func removePipelineObservers() {
         if let listener = defaultOutputDeviceListener {
             var address = Self.defaultOutputDevicePropertyAddress()
@@ -256,6 +309,35 @@ public final class HearItEngine: @unchecked Sendable {
         if let observer = engineConfigurationObserver {
             NotificationCenter.default.removeObserver(observer)
             engineConfigurationObserver = nil
+        }
+
+        let notificationCenter = NSWorkspace.shared.notificationCenter
+        if let observer = targetLaunchObserver {
+            notificationCenter.removeObserver(observer)
+            targetLaunchObserver = nil
+        }
+
+        if let observer = targetTerminateObserver {
+            notificationCenter.removeObserver(observer)
+            targetTerminateObserver = nil
+        }
+    }
+
+    private func handleTargetApplicationNotification(_ notification: Notification) {
+        guard let bundleIdentifier = (notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?
+            .bundleIdentifier else {
+            return
+        }
+
+        let matchesCurrentTarget = stateLock.withLock { () -> Bool in
+            guard case .bundle(let targetBundleIdentifier) = currentTapTarget else {
+                return false
+            }
+            return targetBundleIdentifier == bundleIdentifier
+        }
+
+        if matchesCurrentTarget {
+            schedulePipelineRestart(reason: .targetApp)
         }
     }
 
@@ -432,13 +514,10 @@ public final class HearItEngine: @unchecked Sendable {
 
     private func startPipelineResources() throws {
         try preparePlayback()
-        let excludedProcesses = Self.currentProcessObjectIDsForExclusionWithRetry()
-        stateLock.withLock {
-            excludingCurrentProcess = !excludedProcesses.isEmpty
-        }
+        let scope = try tapScopeForCurrentTarget()
 
         let tap = SystemAudioTap(
-            excludedProcessObjectIDs: excludedProcesses,
+            scope: scope,
             debugLogging: debugLogging
         )
         stateLock.withLock {
@@ -457,6 +536,32 @@ public final class HearItEngine: @unchecked Sendable {
             }
             tap.stop()
             throw error
+        }
+    }
+
+    private func tapScopeForCurrentTarget() throws -> SystemAudioTap.TapScope {
+        let target = stateLock.withLock { currentTapTarget }
+
+        switch target {
+        case .systemWide:
+            let excludedProcesses = Self.currentProcessObjectIDsForExclusionWithRetry()
+            stateLock.withLock {
+                excludingCurrentProcess = !excludedProcesses.isEmpty
+            }
+            return .globalExcluding(excludedProcesses)
+
+        case .bundle(let bundleIdentifier):
+            let processObjectIDs = Self.processObjectIDs(forBundleIdentifier: bundleIdentifier)
+            guard !processObjectIDs.isEmpty else {
+                stateLock.withLock {
+                    excludingCurrentProcess = false
+                }
+                throw AudioError.targetProcessNotFound(bundleIdentifier)
+            }
+            stateLock.withLock {
+                excludingCurrentProcess = false
+            }
+            return .processes(processObjectIDs)
         }
     }
 
@@ -846,6 +951,21 @@ public final class HearItEngine: @unchecked Sendable {
             Thread.sleep(forTimeInterval: 0.05)
         }
         return []
+    }
+
+    private static func processObjectIDs(forBundleIdentifier bundleIdentifier: String) -> [AudioObjectID] {
+        let pids = NSWorkspace.shared.runningApplications.compactMap { application -> pid_t? in
+            guard application.bundleIdentifier == bundleIdentifier, !application.isTerminated else {
+                return nil
+            }
+            return application.processIdentifier
+        }
+
+        var processObjectIDs: [AudioObjectID] = []
+        for pid in pids {
+            processObjectIDs.append(contentsOf: SystemAudioTap.processObjectIDs(forPID: pid))
+        }
+        return processObjectIDs
     }
 }
 

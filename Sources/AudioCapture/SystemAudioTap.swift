@@ -6,6 +6,11 @@ import OSLog
 
 @available(macOS 14.2, *)
 public final class SystemAudioTap: @unchecked Sendable {
+    public enum TapScope: Sendable {
+        case globalExcluding([AudioObjectID])
+        case processes([AudioObjectID])
+    }
+
     public typealias AudioBufferHandler = @Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void
     private enum LifecycleState {
         case idle
@@ -31,11 +36,16 @@ public final class SystemAudioTap: @unchecked Sendable {
 
     private var state: LifecycleState = .idle
     private var bufferHandler: AudioBufferHandler?
-    private let excludedProcessObjectIDs: [AudioObjectID]
+    private let scope: TapScope
     private let debugLogging: Bool
 
+    public init(scope: TapScope, debugLogging: Bool = false) {
+        self.scope = scope
+        self.debugLogging = debugLogging
+    }
+
     public init(excludedProcessObjectIDs: [AudioObjectID] = [], debugLogging: Bool = false) {
-        self.excludedProcessObjectIDs = excludedProcessObjectIDs
+        self.scope = .globalExcluding(excludedProcessObjectIDs)
         self.debugLogging = debugLogging
     }
 
@@ -125,7 +135,14 @@ public final class SystemAudioTap: @unchecked Sendable {
     }
 
     private func createProcessTap() throws {
-        let tapDescription = CATapDescription(stereoGlobalTapButExcludeProcesses: excludedProcessObjectIDs)
+        let tapDescription: CATapDescription
+        switch scope {
+        case .globalExcluding(let excludedProcessObjectIDs):
+            tapDescription = CATapDescription(stereoGlobalTapButExcludeProcesses: excludedProcessObjectIDs)
+        case .processes(let processObjectIDs):
+            tapDescription = CATapDescription(stereoMixdownOfProcesses: processObjectIDs)
+        }
+
         let tapUUID = UUID()
         tapDescription.uuid = tapUUID
         tapDescription.muteBehavior = .mutedWhenTapped
@@ -148,7 +165,11 @@ public final class SystemAudioTap: @unchecked Sendable {
     }
 
     public static func currentProcessObjectIDsForExclusion() -> [AudioObjectID] {
-        var pid = getpid()
+        processObjectIDs(forPID: getpid())
+    }
+
+    public static func processObjectIDs(forPID pid: pid_t) -> [AudioObjectID] {
+        var pid = pid
         var processObjectID = AudioObjectID(kAudioObjectUnknown)
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyTranslatePIDToProcessObject,
