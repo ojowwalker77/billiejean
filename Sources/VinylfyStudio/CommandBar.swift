@@ -8,6 +8,8 @@ struct CommandBar: View {
     @Bindable var model: MainViewModel
     @Binding var showSettings: Bool
     var showWidgetOnMinimize: Binding<Bool>
+    /// Canvas glass: 0 = solid (and free — the desktop blur only mounts above 0).
+    @AppStorage("billiejean.canvasTransparency") private var canvasTransparency = 0.0
 
     private var studio: StudioViewModel { model.studio }
 
@@ -99,6 +101,12 @@ struct CommandBar: View {
             GlassMenu {
                 GlassMenuToggleRow(title: "Show Widget on Minimize",
                                    isOn: showWidgetOnMinimize)
+                Rectangle()
+                    .fill(Theme.Palette.separator)
+                    .frame(height: 1)
+                    .padding(.horizontal, 8)
+                GlassMenuSliderRow(title: "Background Glass",
+                                   value: $canvasTransparency)
             }
             .padding(8)
         }

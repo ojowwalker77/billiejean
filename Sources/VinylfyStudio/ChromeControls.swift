@@ -195,6 +195,34 @@ struct GlassMenuToggleRow: View {
     }
 }
 
+/// A labeled slider row for the glass settings menu, with a live percent readout.
+@available(macOS 14.2, *)
+struct GlassMenuSliderRow: View {
+    let title: String
+    @Binding var value: Double
+    var range: ClosedRange<Double> = 0...1
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(title)
+                    .font(WindowChrome.labelFont)
+                    .foregroundStyle(Theme.Palette.body)
+                Spacer(minLength: 8)
+                Text("\(Int((value / range.upperBound * 100).rounded()))%")
+                    .font(WindowChrome.labelFont.monospacedDigit())
+                    .foregroundStyle(Theme.Palette.chromeText)
+            }
+            Slider(value: $value, in: range)
+                .controlSize(.small)
+                .tint(Theme.Palette.accent)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .frame(width: 210)
+    }
+}
+
 // MARK: - Toast
 
 @available(macOS 14.2, *)
