@@ -25,11 +25,36 @@ public struct MusicPlaylist: Sendable, Equatable, Identifiable {
     }
 }
 
+public struct MusicTrack: Sendable, Equatable, Identifiable {
+    public let id: String
+    public let name: String
+    public let artist: String
+    public let durationSeconds: Double?
+    public let index: Int
+
+    public init(
+        id: String,
+        name: String,
+        artist: String,
+        durationSeconds: Double?,
+        index: Int
+    ) {
+        self.id = id
+        self.name = name
+        self.artist = artist
+        self.durationSeconds = durationSeconds
+        self.index = index
+    }
+}
+
 public final class MusicController: @unchecked Sendable {
     private enum ScriptKind: CaseIterable {
         case fetchPlaylists
         case fetchArtwork
+        case fetchTrackArtwork
+        case fetchTracks
         case playPlaylist
+        case playTrack
         case playPause
         case nextTrack
         case previousTrack
@@ -73,7 +98,7 @@ public final class MusicController: @unchecked Sendable {
                 on fetchArtwork(playlistID)
                     tell application id "com.apple.Music"
                         try
-                            set targetPlaylist to user playlist id playlistID
+                            set targetPlaylist to first user playlist whose persistent ID is playlistID
                             if (count of tracks of targetPlaylist) is 0 then return missing value
                             set firstTrack to track 1 of targetPlaylist
                             if (count of artworks of firstTrack) is 0 then return missing value
@@ -84,14 +109,69 @@ public final class MusicController: @unchecked Sendable {
                     end tell
                 end fetchArtwork
                 """
+            case .fetchTrackArtwork:
+                """
+                on fetchTrackArtwork(trackID, playlistID)
+                    tell application id "com.apple.Music"
+                        try
+                            set targetTrack to first track of (first user playlist whose persistent ID is playlistID) whose persistent ID is trackID
+                            if (count of artworks of targetTrack) is 0 then return missing value
+                            return raw data of artwork 1 of targetTrack
+                        on error
+                            return missing value
+                        end try
+                    end tell
+                end fetchTrackArtwork
+                """
+            case .fetchTracks:
+                """
+                on textOrBlank(valueToFormat)
+                    if valueToFormat is missing value then return ""
+                    return valueToFormat as text
+                end textOrBlank
+
+                on fetchTracks(playlistID)
+                    set recordDelimiter to ASCII character 30
+                    set unitDelimiter to ASCII character 31
+                    set rows to {}
+                    tell application id "com.apple.Music"
+                        set targetPlaylist to first user playlist whose persistent ID is playlistID
+                        set trackIDs to persistent ID of every track of targetPlaylist
+                        set trackNames to name of every track of targetPlaylist
+                        set trackArtists to artist of every track of targetPlaylist
+                        set trackDurations to duration of every track of targetPlaylist
+                    end tell
+
+                    repeat with trackIndex from 1 to count of trackIDs
+                        set trackID to my textOrBlank(item trackIndex of trackIDs)
+                        set trackName to my textOrBlank(item trackIndex of trackNames)
+                        set trackArtist to my textOrBlank(item trackIndex of trackArtists)
+                        set trackDuration to my textOrBlank(item trackIndex of trackDurations)
+                        set end of rows to trackID & unitDelimiter & trackName & unitDelimiter & trackArtist & unitDelimiter & trackDuration & unitDelimiter & (trackIndex as text)
+                    end repeat
+
+                    set AppleScript's text item delimiters to recordDelimiter
+                    set outputText to rows as text
+                    set AppleScript's text item delimiters to ""
+                    return outputText
+                end fetchTracks
+                """
             case .playPlaylist:
                 """
                 on playPlaylist(playlistID, shuffleValue)
                     tell application id "com.apple.Music"
                         set shuffle enabled to shuffleValue
-                        play user playlist id playlistID
+                        play (first user playlist whose persistent ID is playlistID)
                     end tell
                 end playPlaylist
+                """
+            case .playTrack:
+                """
+                on playTrack(trackID, playlistID)
+                    tell application id "com.apple.Music"
+                        play (first track of (first user playlist whose persistent ID is playlistID) whose persistent ID is trackID)
+                    end tell
+                end playTrack
                 """
             case .playPause:
                 """
@@ -136,8 +216,14 @@ public final class MusicController: @unchecked Sendable {
                 nil
             case .fetchArtwork:
                 "fetchArtwork"
+            case .fetchTrackArtwork:
+                "fetchTrackArtwork"
+            case .fetchTracks:
+                "fetchTracks"
             case .playPlaylist:
                 "playPlaylist"
+            case .playTrack:
+                "playTrack"
             case .playPause:
                 "playPause"
             case .nextTrack:
@@ -246,12 +332,80 @@ public final class MusicController: @unchecked Sendable {
         }
     }
 
+    /// Album artwork for a single track (for the song grid), cached by track id.
+    public func fetchArtwork(
+        forTrack trackID: String,
+        inPlaylist playlistID: String,
+        _ completion: @escaping @Sendable (Data?) -> Void
+    ) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            guard self.isMusicRunning else {
+                completion(nil)
+                return
+            }
+
+            let cacheKey = "track:\(trackID)"
+            if let cached = self.artworkCache[cacheKey] {
+                completion(cached)
+                return
+            }
+
+            guard let descriptor = self.executeScript(
+                .fetchTrackArtwork,
+                arguments: [
+                    NSAppleEventDescriptor(string: trackID),
+                    NSAppleEventDescriptor(string: playlistID),
+                ]
+            ), let pngData = Self.pngData(from: descriptor.data) else {
+                completion(nil)
+                return
+            }
+
+            self.artworkCache[cacheKey] = pngData
+            completion(pngData)
+        }
+    }
+
+    public func fetchTracks(
+        forPlaylist id: String,
+        _ completion: @escaping @Sendable (Result<[MusicTrack], Error>) -> Void
+    ) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            guard self.isMusicRunning else {
+                completion(.success([]))
+                return
+            }
+
+            guard let descriptor = self.executeScript(
+                .fetchTracks,
+                arguments: [NSAppleEventDescriptor(string: id)]
+            ) else {
+                completion(.failure(ControllerError.scriptExecutionFailed))
+                return
+            }
+
+            completion(.success(Self.parseTracks(from: descriptor.stringValue ?? "")))
+        }
+    }
+
     public func playPlaylist(id: String, shuffle: Bool) {
         performTransport(
             .playPlaylist,
             arguments: [
                 .string(id),
                 .bool(shuffle),
+            ]
+        )
+    }
+
+    public func playTrack(id trackID: String, inPlaylist playlistID: String) {
+        performTransport(
+            .playTrack,
+            arguments: [
+                .string(trackID),
+                .string(playlistID),
             ]
         )
     }
@@ -412,12 +566,36 @@ public final class MusicController: @unchecked Sendable {
             let id = String(fields[0])
             let name = String(fields[1])
             let trackCount = Int(fields[2]) ?? 0
-            let durationText = String(fields[3])
+            // AppleScript stringifies reals with the locale decimal separator.
+            let durationText = String(fields[3]).replacingOccurrences(of: ",", with: ".")
             return MusicPlaylist(
                 id: id,
                 name: name,
                 trackCount: trackCount,
                 durationSeconds: durationText.isEmpty ? nil : Double(durationText)
+            )
+        }
+    }
+
+    private static func parseTracks(from text: String) -> [MusicTrack] {
+        guard !text.isEmpty else {
+            return []
+        }
+
+        return text.split(separator: recordSeparator, omittingEmptySubsequences: true).compactMap { row in
+            let fields = row.split(separator: unitSeparator, omittingEmptySubsequences: false)
+            guard fields.count >= 5 else {
+                return nil
+            }
+
+            // AppleScript stringifies reals with the locale decimal separator.
+            let durationText = String(fields[3]).replacingOccurrences(of: ",", with: ".")
+            return MusicTrack(
+                id: String(fields[0]),
+                name: String(fields[1]),
+                artist: String(fields[2]),
+                durationSeconds: durationText.isEmpty ? nil : Double(durationText),
+                index: Int(fields[4]) ?? 0
             )
         }
     }

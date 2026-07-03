@@ -61,6 +61,14 @@ final class HearItRunner: @unchecked Sendable {
     }
 }
 
+@available(macOS 14.2, *)
+final class ProbeDoneFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    func set() { lock.withLock { value = true } }
+    func isSet() -> Bool { lock.withLock { value } }
+}
+
 /// `--playlists`: fetch and print the user's Music playlists via MusicController.
 @available(macOS 14.2, *)
 enum PlaylistProbe {
@@ -72,13 +80,7 @@ enum PlaylistProbe {
         }
         // MusicController runs its AppleScript on the main thread, so keep the
         // main run loop pumping instead of blocking it with a semaphore.
-        final class DoneFlag: @unchecked Sendable {
-            private let lock = NSLock()
-            private var value = false
-            func set() { lock.withLock { value = true } }
-            func isSet() -> Bool { lock.withLock { value } }
-        }
-        let done = DoneFlag()
+        let done = ProbeDoneFlag()
         controller.fetchPlaylists { result in
             switch result {
             case .success(let playlists):
@@ -89,6 +91,37 @@ enum PlaylistProbe {
                 }
             case .failure(let error):
                 print("fetchPlaylists failed: \(error.localizedDescription)")
+            }
+            done.set()
+        }
+        let deadline = Date().addingTimeInterval(20)
+        while !done.isSet() && Date() < deadline {
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.1))
+        }
+    }
+}
+
+/// `--tracks <playlistID>`: fetch and print tracks from a Music playlist.
+@available(macOS 14.2, *)
+enum TracksProbe {
+    static func run(playlistID: String) throws {
+        let controller = MusicController()
+        guard controller.isMusicRunning else {
+            print("Music is not running.")
+            return
+        }
+
+        let done = ProbeDoneFlag()
+        controller.fetchTracks(forPlaylist: playlistID) { result in
+            switch result {
+            case .success(let tracks):
+                print("tracks=\(tracks.count)")
+                for track in tracks.prefix(30) {
+                    let mins = track.durationSeconds.map { String(format: "%.1fm", $0 / 60) } ?? "?"
+                    print("- \(track.index). [\(track.id)] \(track.name) - \(track.artist) (\(mins))")
+                }
+            case .failure(let error):
+                print("fetchTracks failed: \(error.localizedDescription)")
             }
             done.set()
         }
@@ -163,6 +196,8 @@ if #available(macOS 14.2, *) {
             try DemoRunner.run(seconds: seconds)
         } else if CommandLine.arguments.contains("--playlists") {
             try PlaylistProbe.run()
+        } else if let playlistID = tracksArgument() {
+            try TracksProbe.run(playlistID: playlistID)
         } else {
             let runner = HearItRunner(
                 bypass: CommandLine.arguments.contains("--bypass"),
@@ -185,4 +220,12 @@ private func secondsArgument() -> Double? {
         return nil
     }
     return Double(CommandLine.arguments[index + 1])
+}
+
+private func tracksArgument() -> String? {
+    guard let index = CommandLine.arguments.firstIndex(of: "--tracks"),
+          CommandLine.arguments.indices.contains(index + 1) else {
+        return nil
+    }
+    return CommandLine.arguments[index + 1]
 }

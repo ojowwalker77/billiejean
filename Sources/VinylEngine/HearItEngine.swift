@@ -101,8 +101,8 @@ public final class HearItEngine: @unchecked Sendable {
         }
     }
 
-    private let engine = AVAudioEngine()
-    private let player = AVAudioPlayerNode()
+    private lazy var engine = AVAudioEngine()
+    private lazy var player = AVAudioPlayerNode()
     private let processingQueue = DispatchQueue(label: "com.vinylfy.hearit.processing", qos: .userInteractive)
     private let playbackQueue = DispatchQueue(label: "com.vinylfy.hearit.playback", qos: .userInitiated)
     private let restartQueue = DispatchQueue(label: "com.vinylfy.hearit.restart", qos: .userInitiated)
@@ -180,8 +180,19 @@ public final class HearItEngine: @unchecked Sendable {
         prepareDebugRecording()
 
         do {
-            try startPipelineResources()
             try installPipelineObservers()
+            do {
+                try startPipelineResources()
+            } catch {
+                if Self.isTargetProcessNotFound(error) {
+                    tearDownPipelineForRestart()
+                    if debugLogging {
+                        print("pipeline_armed target_process_not_found")
+                    }
+                    return
+                }
+                throw error
+            }
         } catch {
             stopUnlocked()
             throw error
@@ -513,8 +524,8 @@ public final class HearItEngine: @unchecked Sendable {
     }
 
     private func startPipelineResources() throws {
-        try preparePlayback()
         let scope = try tapScopeForCurrentTarget()
+        try preparePlayback()
 
         let tap = SystemAudioTap(
             scope: scope,
@@ -565,6 +576,13 @@ public final class HearItEngine: @unchecked Sendable {
         }
     }
 
+    private static func isTargetProcessNotFound(_ error: Error) -> Bool {
+        guard case AudioError.targetProcessNotFound = error else {
+            return false
+        }
+        return true
+    }
+
     private func preparePlayback() throws {
         var startError: Error?
         playbackQueue.sync {
@@ -590,7 +608,9 @@ public final class HearItEngine: @unchecked Sendable {
 
     private func stopPlayback() {
         let work = {
-            self.player.stop()
+            if self.playerAttached {
+                self.player.stop()
+            }
             self.resetPlaybackQueueState()
         }
 
