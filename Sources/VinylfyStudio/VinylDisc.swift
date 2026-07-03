@@ -166,7 +166,8 @@ struct SleeveCell: View {
         }
         .onHover { hovering = $0 }
         .onAppear(perform: onAppear)
-        .help(title)
+        // No .help: the name is printed right under the cover, and one tooltip
+        // tracker per cell makes every pointer move hit-test the whole grid.
     }
 
     private var cover: some View {
@@ -266,7 +267,6 @@ struct SleevePlayButton: View {
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
         .animation(ChromeMotion.hover, value: hovering)
-        .help("Play")
     }
 }
 

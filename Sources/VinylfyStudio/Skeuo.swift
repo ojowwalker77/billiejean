@@ -189,7 +189,7 @@ struct SlideLever: View {
                     }
                 }
         )
-        .help(on ? "Vinyl — flip down for Original" : "Original — flip up for Vinyl")
+        // No .help: the engraved VINYL/ORIG labels are the affordance.
     }
 
     private var track: some View {
@@ -442,8 +442,9 @@ struct DeckFader: View {
                     }
                 )
             )
-            .help(help)
-
+            // No .help here: every tooltip registers a hover tracker, and each
+            // pointer move hit-tests the whole tree (measured jank). The
+            // printed label under the fader is the affordance.
             if let label {
                 Text(label)
                     .font(WindowChrome.captionFont)

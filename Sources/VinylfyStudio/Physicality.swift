@@ -158,7 +158,8 @@ struct DeckButton: View {
             Image(systemName: symbol)
         }
         .buttonStyle(DeckButtonStyle(diameter: diameter, glyphSize: glyphSize, accentGlyph: accentGlyph))
-        .help(help)
+        // No .help: transport glyphs are universal, and tooltip hover trackers
+        // cost a full-tree hit-test per pointer move.
     }
 }
 
@@ -275,7 +276,6 @@ struct PhysicalKnob: View {
         )
         .onHover { hovering = $0 }
         .animation(ChromeMotion.hover, value: hovering)
-        .help(help)
     }
 
     /// Knurling: alternating grip cuts around the skirt (they rotate with the knob).
