@@ -321,12 +321,17 @@ struct IdentityPicker: View {
         VStack(alignment: .leading, spacing: 0) {
             faceRow
             if open {
-                Rectangle()
-                    .fill(Theme.Palette.separator)
-                    .frame(height: 1)
-                    .padding(.horizontal, 8)
-                    .padding(.top, 4)
-                list
+                // Fixed width — the expanded body must never inherit the
+                // window's width (a bare Rectangle is greedy and would).
+                VStack(alignment: .leading, spacing: 0) {
+                    Rectangle()
+                        .fill(Theme.Palette.separator)
+                        .frame(height: 1)
+                        .padding(.horizontal, 8)
+                        .padding(.top, 4)
+                    list
+                }
+                .frame(width: 248, alignment: .leading)
             }
         }
         .composerPopupSurface(radius: WindowChrome.radius)

@@ -278,6 +278,42 @@ public final class MusicController: @unchecked Sendable {
     private var scripts: [ScriptKind: NSAppleScript] = [:]
     private var artworkCache: [String: Data] = [:]
 
+    /// Disk cache so covers survive relaunches (AppleScript artwork fetches are
+    /// slow). Lives in the user's Caches directory; safe to delete anytime.
+    private static let diskCacheDirectory: URL? = {
+        guard let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+        let dir = base.appendingPathComponent("com.jow.billiejean/artwork", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }()
+
+    private static func diskCacheURL(forKey key: String) -> URL? {
+        let safe = key.map { $0.isLetter || $0.isNumber ? $0 : "_" }
+        return diskCacheDirectory?.appendingPathComponent(String(safe) + ".png")
+    }
+
+    /// Memory -> disk lookup; populates the memory cache on a disk hit.
+    private func cachedArtwork(forKey key: String) -> Data? {
+        if let hit = artworkCache[key] {
+            return hit
+        }
+        guard let url = Self.diskCacheURL(forKey: key),
+              let data = try? Data(contentsOf: url) else {
+            return nil
+        }
+        artworkCache[key] = data
+        return data
+    }
+
+    private func storeArtwork(_ data: Data, forKey key: String) {
+        artworkCache[key] = data
+        if let url = Self.diskCacheURL(forKey: key) {
+            try? data.write(to: url)
+        }
+    }
+
     public init() {}
 
     public var isMusicRunning: Bool {
@@ -314,7 +350,7 @@ public final class MusicController: @unchecked Sendable {
                 return
             }
 
-            if let cached = self.artworkCache[id] {
+            if let cached = self.cachedArtwork(forKey: id) {
                 completion(cached)
                 return
             }
@@ -327,7 +363,7 @@ public final class MusicController: @unchecked Sendable {
                 return
             }
 
-            self.artworkCache[id] = pngData
+            self.storeArtwork(pngData, forKey: id)
             completion(pngData)
         }
     }
@@ -346,7 +382,7 @@ public final class MusicController: @unchecked Sendable {
             }
 
             let cacheKey = "track:\(trackID)"
-            if let cached = self.artworkCache[cacheKey] {
+            if let cached = self.cachedArtwork(forKey: cacheKey) {
                 completion(cached)
                 return
             }
@@ -362,7 +398,7 @@ public final class MusicController: @unchecked Sendable {
                 return
             }
 
-            self.artworkCache[cacheKey] = pngData
+            self.storeArtwork(pngData, forKey: cacheKey)
             completion(pngData)
         }
     }
