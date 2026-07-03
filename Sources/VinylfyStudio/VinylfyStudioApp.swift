@@ -17,14 +17,19 @@ struct VinylfyStudioApp: App {
 /// wires the right-click context menu, and tears down on quit.
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var panel: NSPanel?
+    private var statusMenuController: AnyObject?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Menu-bar-less accessory app that floats over other apps.
+        // Accessory app: no dock icon, floats over other apps, but still gets
+        // a status item in the menu bar.
         NSApp.setActivationPolicy(.accessory)
 
         guard #available(macOS 14.2, *) else { return }
         MainActor.assumeIsolated {
             buildPanel()
+            let controller = StatusMenuController()
+            controller.install()
+            statusMenuController = controller
             StudioViewModel.shared.bootstrap()
         }
     }
@@ -77,6 +82,94 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             MainActor.assumeIsolated {
                 StudioViewModel.shared.shutdown()
             }
+        }
+    }
+}
+
+/// Menu-bar status item — the primary control surface: transport, A/B,
+/// skins, and quit, always one click away. The menu is rebuilt each time it
+/// opens so checkmarks always reflect current state.
+@available(macOS 14.2, *)
+final class StatusMenuController: NSObject, NSMenuDelegate {
+    private var statusItem: NSStatusItem?
+
+    @MainActor
+    func install() {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        item.button?.image = NSImage(
+            systemSymbolName: "opticaldisc.fill",
+            accessibilityDescription: "Vinylfy"
+        )
+        let menu = NSMenu()
+        menu.delegate = self
+        item.menu = menu
+        statusItem = item
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let (running, bypass, skinKind) = MainActor.assumeIsolated {
+            let model = StudioViewModel.shared
+            return (model.isRunning, model.bypass, model.skinKind)
+        }
+
+        let transport = NSMenuItem(
+            title: running ? "Stop" : "Start",
+            action: #selector(toggleTransport), keyEquivalent: ""
+        )
+        transport.target = self
+        menu.addItem(transport)
+
+        menu.addItem(.separator())
+
+        let vinyl = NSMenuItem(title: "Vinyl", action: #selector(useVinyl), keyEquivalent: "")
+        vinyl.target = self
+        vinyl.state = bypass ? .off : .on
+        menu.addItem(vinyl)
+
+        let original = NSMenuItem(title: "Original", action: #selector(useOriginal), keyEquivalent: "")
+        original.target = self
+        original.state = bypass ? .on : .off
+        menu.addItem(original)
+
+        menu.addItem(.separator())
+
+        for kind in SkinKind.allCases {
+            let item = NSMenuItem(
+                title: "\(kind.displayName) Skin",
+                action: #selector(selectSkin(_:)), keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = kind.rawValue
+            item.state = kind == skinKind ? .on : .off
+            menu.addItem(item)
+        }
+
+        menu.addItem(.separator())
+
+        let quit = NSMenuItem(title: "Quit Vinylfy", action: #selector(quit), keyEquivalent: "q")
+        quit.target = self
+        menu.addItem(quit)
+    }
+
+    @objc private func toggleTransport() {
+        MainActor.assumeIsolated { StudioViewModel.shared.toggleRunning() }
+    }
+    @objc private func useVinyl() {
+        MainActor.assumeIsolated { StudioViewModel.shared.bypass = false }
+    }
+    @objc private func useOriginal() {
+        MainActor.assumeIsolated { StudioViewModel.shared.bypass = true }
+    }
+    @objc private func selectSkin(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let kind = SkinKind(rawValue: raw) else { return }
+        MainActor.assumeIsolated { StudioViewModel.shared.skinKind = kind }
+    }
+    @objc private func quit() {
+        MainActor.assumeIsolated {
+            StudioViewModel.shared.shutdown()
+            NSApp.terminate(nil)
         }
     }
 }
