@@ -143,6 +143,15 @@ public final class NowPlayingService: @unchecked Sendable {
         }
     }
 
+    /// One immediate off-schedule poll (transport commands call this so the UI
+    /// reflects the new player state in ~centiseconds instead of the next tick).
+    public func pollNow() {
+        pollQueue.async { [weak self] in
+            guard let self, self.timer != nil else { return }
+            self.poll()
+        }
+    }
+
     private func poll() {
         let snapshot = makeSnapshot()
         snapshotHandler?(snapshot)

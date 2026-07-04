@@ -10,6 +10,8 @@ extension Notification.Name {
     static let billieNext = Notification.Name("billie.next")
     static let billieLibrary = Notification.Name("billie.library")
     static let billieSettings = Notification.Name("billie.settings")
+    static let billieSearch = Notification.Name("billie.search")
+    static let billieUpNext = Notification.Name("billie.upNext")
     /// Posted after a canvas-state transition so the window controller can
     /// re-layout the traffic lights once SwiftUI has rebuilt the content.
     static let billieRelayoutChrome = Notification.Name("billie.relayoutChrome")
@@ -31,6 +33,9 @@ struct MainWindowView: View {
 
     @State private var showingFlavorMenu = false
     @State private var showingSettingsMenu = false
+    @State private var showingSearch = false
+    /// The right-edge Up Next queue slide-over (player state only).
+    @State private var showingUpNext = false
 
     private var studio: StudioViewModel { model.studio }
 
@@ -66,10 +71,28 @@ struct MainWindowView: View {
                         .zIndex(50)
                 }
 
+                // Layer: Up Next toggle — a lone pill top-right on the player
+                // canvas (only while the standalone bridge is up).
+                if isPlayer && model.standalone.isConnected {
+                    upNextToggle
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                        .padding(.top, WindowChrome.edgeInset)
+                        .padding(.trailing, WindowChrome.edgeInset)
+                        .zIndex(50)
+                }
+
+                // Layer: Up Next queue slide-over — over the player canvas only.
+                if isPlayer && showingUpNext {
+                    UpNextPanel(model: model)
+                        .transition(.move(edge: .trailing).combined(with: .opacity))
+                        .zIndex(90)
+                }
+
                 // Layer: bottom command bar — NOT in player (the turntable is the instrument).
                 if !isPlayer {
                     CommandBar(model: model,
                                showSettings: $showingSettingsMenu,
+                               showSearch: $showingSearch,
                                showWidgetOnMinimize: showWidgetOnMinimize)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                         .padding(.bottom, WindowChrome.edgeInset)
@@ -85,6 +108,13 @@ struct MainWindowView: View {
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                         .zIndex(80)
                 }
+
+                // Layer: catalog search overlay — above everything.
+                if showingSearch {
+                    SearchOverlay(model: model, isPresented: $showingSearch)
+                        .transition(.opacity)
+                        .zIndex(100)
+                }
             }
             .frame(width: geo.size.width, height: geo.size.height)
         }
@@ -93,6 +123,11 @@ struct MainWindowView: View {
         .ignoresSafeArea()
         .onAppear { model.loadPlaylistsIfNeeded() }
         .onChange(of: model.state) { _, _ in
+            // Leaving the player collapses the Up Next slide-over (it lives only
+            // over the turntable canvas).
+            if !isPlayer, showingUpNext {
+                withAnimation(ChromeMotion.spring) { showingUpNext = false }
+            }
             // The content rebuilds on transition; re-layout the traffic lights
             // after SwiftUI has applied the change.
             DispatchQueue.main.async {
@@ -113,6 +148,17 @@ struct MainWindowView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .billieSettings)) { _ in
             showingSettingsMenu.toggle()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .billieSearch)) { _ in
+            // ⌘K is a no-op unless the standalone bridge is up.
+            guard model.standalone.isConnected else { return }
+            withAnimation(ChromeMotion.spring) { showingSearch.toggle() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .billieUpNext)) { _ in
+            // ⌘U toggles the queue slide-over — only in the player, only when
+            // the standalone bridge is up.
+            guard isPlayer, model.standalone.isConnected else { return }
+            withAnimation(ChromeMotion.spring) { showingUpNext.toggle() }
         }
     }
 
@@ -137,6 +183,17 @@ struct MainWindowView: View {
 
     private var identityPill: some View {
         IdentityPicker(model: model)
+    }
+
+    // MARK: - Up Next toggle (top-right, player only)
+
+    private var upNextToggle: some View {
+        ChromeIconButton(symbol: "list.triangle",
+                         help: "Up Next  ⌘U",
+                         active: showingUpNext) {
+            withAnimation(ChromeMotion.spring) { showingUpNext.toggle() }
+        }
+        .chromePill()
     }
 
     // MARK: - Presence pill (top-right)

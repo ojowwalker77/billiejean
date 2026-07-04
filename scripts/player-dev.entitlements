@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Apple Development signing — pair with the Xcode-managed development
+         profile (scripts/player.provisionprofile). This is the restricted
+         entitlement MusicKit token retrieval requires; only an embedded
+         profile can authorize it. Prefix = TEAM ID (57249C654W), not the
+         certificate suffix. -->
+    <key>com.apple.application-identifier</key>
+    <string>57249C654W.com.jow.billiejean.player</string>
+</dict>
+</plist>

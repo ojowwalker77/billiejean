@@ -4,3 +4,4 @@
 .swiftpm/
 dist/
 scripts/AppIcon.iconset/
+scripts/player.provisionprofile

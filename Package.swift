@@ -10,9 +10,11 @@ let package = Package(
     products: [
         .executable(name: "VinylfyStudio", targets: ["VinylfyStudio"]),
         .executable(name: "VinylfyHearIt", targets: ["VinylfyHearIt"]),
+        .executable(name: "VinylfyPlayerHelper", targets: ["VinylfyPlayerHelper"]),
         .library(name: "AudioCapture", targets: ["AudioCapture"]),
         .library(name: "DSP", targets: ["DSP"]),
         .library(name: "NowPlaying", targets: ["NowPlaying"]),
+        .library(name: "PlayerBridge", targets: ["PlayerBridge"]),
         .library(name: "VinylEngine", targets: ["VinylEngine"]),
     ],
     targets: [
@@ -32,10 +34,14 @@ let package = Package(
         ),
         .target(
             name: "NowPlaying",
+            dependencies: ["PlayerBridge"],
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("CoreImage"),
             ]
+        ),
+        .target(
+            name: "PlayerBridge"
         ),
         .target(
             name: "VinylEngine",
@@ -61,9 +67,21 @@ let package = Package(
                 .linkedFramework("CoreAudio"),
             ]
         ),
+        .executableTarget(
+            name: "VinylfyPlayerHelper",
+            dependencies: ["PlayerBridge"],
+            linkerSettings: [
+                .linkedFramework("AppKit"),
+                .linkedFramework("MusicKit"),
+            ]
+        ),
         .testTarget(
             name: "DSPTests",
             dependencies: ["DSP"]
+        ),
+        .testTarget(
+            name: "PlayerBridgeTests",
+            dependencies: ["PlayerBridge"]
         ),
     ]
 )

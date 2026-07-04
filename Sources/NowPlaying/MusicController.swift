@@ -56,6 +56,8 @@ public final class MusicController: @unchecked Sendable {
         case playPlaylist
         case playTrack
         case playPause
+        case pause
+        case resume
         case nextTrack
         case previousTrack
         case seek
@@ -166,10 +168,46 @@ public final class MusicController: @unchecked Sendable {
                 end playPlaylist
                 """
             case .playTrack:
+                // Music.app kills the play queue whenever a bare track reference
+                // is played (every form: whose-filter, index, tell-block — all
+                // verified 2026-07): the track plays once, then playback stops.
+                // Only playing a PLAYLIST object yields a real queue. So: mirror
+                // tracks N…end into an app-owned helper playlist and play that
+                // (the Alfred mini-player pattern). Index 1 short-circuits to
+                // playing the real playlist directly.
                 """
-                on playTrack(trackID, playlistID)
+                on playTrack(trackID, trackIndex, playlistID)
                     tell application id "com.apple.Music"
-                        play (first track of (first user playlist whose persistent ID is playlistID) whose persistent ID is trackID)
+                        set sourcePlaylist to first user playlist whose persistent ID is playlistID
+                        set resolvedIndex to trackIndex
+                        try
+                            if (persistent ID of track resolvedIndex of sourcePlaylist) is not trackID then set resolvedIndex to 0
+                        on error
+                            set resolvedIndex to 0
+                        end try
+                        if resolvedIndex is 0 then
+                            set allIDs to persistent ID of every track of sourcePlaylist
+                            repeat with i from 1 to count of allIDs
+                                if item i of allIDs is trackID then
+                                    set resolvedIndex to i
+                                    exit repeat
+                                end if
+                            end repeat
+                        end if
+                        if resolvedIndex is 0 then return
+                        if resolvedIndex is 1 then
+                            play sourcePlaylist
+                            return
+                        end if
+                        if not (exists user playlist "billiejean queue") then
+                            make new user playlist with properties {name:"billiejean queue"}
+                        end if
+                        set queuePlaylist to first user playlist whose name is "billiejean queue"
+                        try
+                            delete every track of queuePlaylist
+                        end try
+                        duplicate (tracks resolvedIndex thru -1 of sourcePlaylist) to queuePlaylist
+                        play queuePlaylist
                     end tell
                 end playTrack
                 """
@@ -178,6 +216,20 @@ public final class MusicController: @unchecked Sendable {
                 on playPause()
                     tell application id "com.apple.Music" to playpause
                 end playPause
+                """
+            case .pause:
+                // Distinct from playPause: flow control needs idempotent
+                // pause/resume, not a toggle it could race.
+                """
+                on pauseMusic()
+                    tell application id "com.apple.Music" to pause
+                end pauseMusic
+                """
+            case .resume:
+                """
+                on resumeMusic()
+                    tell application id "com.apple.Music" to play
+                end resumeMusic
                 """
             case .nextTrack:
                 """
@@ -226,6 +278,10 @@ public final class MusicController: @unchecked Sendable {
                 "playTrack"
             case .playPause:
                 "playPause"
+            case .pause:
+                "pauseMusic"
+            case .resume:
+                "resumeMusic"
             case .nextTrack:
                 "nextTrack"
             case .previousTrack:
@@ -256,6 +312,7 @@ public final class MusicController: @unchecked Sendable {
         case string(String)
         case bool(Bool)
         case double(Double)
+        case int(Int)
 
         func descriptor() -> NSAppleEventDescriptor {
             switch self {
@@ -265,6 +322,8 @@ public final class MusicController: @unchecked Sendable {
                 NSAppleEventDescriptor(boolean: value)
             case .double(let value):
                 NSAppleEventDescriptor(double: value)
+            case .int(let value):
+                NSAppleEventDescriptor(int32: Int32(clamping: value))
             }
         }
     }
@@ -275,6 +334,11 @@ public final class MusicController: @unchecked Sendable {
 
     private let logger = Logger(subsystem: "com.vinylfy.app", category: "MusicController")
     private let queue = DispatchQueue(label: "com.vinylfy.musiccontroller")
+    /// Transport commands get their own lane: on the shared queue a play/pause
+    /// press can stall for seconds behind slow artwork/track fetches. Script
+    /// execution itself is main-thread-serialized (runOnMain), so two queues
+    /// never run AppleScript concurrently.
+    private let transportQueue = DispatchQueue(label: "com.vinylfy.musiccontroller.transport", qos: .userInitiated)
     private var scripts: [ScriptKind: NSAppleScript] = [:]
     private var artworkCache: [String: Data] = [:]
 
@@ -436,11 +500,12 @@ public final class MusicController: @unchecked Sendable {
         )
     }
 
-    public func playTrack(id trackID: String, inPlaylist playlistID: String) {
+    public func playTrack(id trackID: String, index trackIndex: Int, inPlaylist playlistID: String) {
         performTransport(
             .playTrack,
             arguments: [
                 .string(trackID),
+                .int(trackIndex),
                 .string(playlistID),
             ]
         )
@@ -448,6 +513,14 @@ public final class MusicController: @unchecked Sendable {
 
     public func playPause() {
         performTransport(.playPause)
+    }
+
+    public func pause() {
+        performTransport(.pause)
+    }
+
+    public func resume() {
+        performTransport(.resume)
     }
 
     public func nextTrack() {
@@ -476,7 +549,7 @@ public final class MusicController: @unchecked Sendable {
         _ kind: ScriptKind,
         arguments: [ScriptArgument] = []
     ) {
-        queue.async { [weak self] in
+        transportQueue.async { [weak self] in
             guard let self else { return }
             self.launchMusicIfNeededOnMain()
             let descriptors = arguments.map { $0.descriptor() }

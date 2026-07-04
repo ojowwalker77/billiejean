@@ -2,6 +2,7 @@ import Foundation
 import SwiftUI
 import AppKit
 import NowPlaying
+import PlayerBridge
 
 /// The canvas has three states: a wall of playlist sleeves (LIBRARY), a wall of
 /// track sleeves for one playlist (SONG GRID), and one big turntable (PLAYER).
@@ -20,6 +21,44 @@ enum CanvasState: Equatable {
 final class MainViewModel {
     let studio = StudioViewModel.shared
     private let music = MusicController()
+    /// The MusicKit helper bridge. While connected the app is fully
+    /// standalone: transport, library, and now-playing all flow through it and
+    /// Music.app is never consulted or launched.
+    let standalone = StandalonePlayer()
+
+    private var isStandalone: Bool { standalone.isConnected }
+
+    init() {
+        wireFlowControl()
+        wireStandalone()
+    }
+
+    private func wireStandalone() {
+        standalone.snapshotHandler = { [weak self] snap in
+            self?.studio.ingestStandaloneSnapshot(snap)
+        }
+        standalone.connectionHandler = { [weak self] connected in
+            guard let self else { return }
+            self.studio.activateStandalone(connected, helperBundleID: StandalonePlayer.helperBundleID)
+            // Refresh the wall from whichever library source is now live.
+            self.refreshPlaylists()
+        }
+    }
+
+    /// Flow control's source pause/resume: the helper bridge when standalone,
+    /// the AppleScript transport otherwise. On release: never auto-resume over
+    /// a user-held output — that would audibly restart the source while the
+    /// user asked for silence.
+    private func wireFlowControl() {
+        studio.flowHoldHandler = { [weak self] holding in
+            guard let self else { return }
+            if holding {
+                self.isStandalone ? self.standalone.holdSource() : self.music.pause()
+            } else if !self.studio.userHeldOutput {
+                self.isStandalone ? self.standalone.releaseSource() : self.music.resume()
+            }
+        }
+    }
 
     // MARK: - Flow
 
@@ -96,6 +135,19 @@ final class MainViewModel {
 
     func refreshPlaylists() {
         isLoadingPlaylists = true
+        if isStandalone {
+            Task { [weak self] in
+                guard let self else { return }
+                let lists = await self.standalone.fetchPlaylists()
+                self.isLoadingPlaylists = false
+                self.playlists = lists ?? []
+                self.musicNotRunning = false
+                if lists == nil {
+                    self.showToast(symbol: "exclamationmark.triangle", message: "Couldn't load library")
+                }
+            }
+            return
+        }
         music.fetchPlaylists { [weak self] result in
             Task { @MainActor in
                 guard let self else { return }
@@ -145,6 +197,14 @@ final class MainViewModel {
         let id = playlist.id
         guard artwork[id] == nil, !artworkInFlight.contains(id) else { return }
         artworkInFlight.insert(id)
+        if isStandalone {
+            Task { [weak self] in
+                guard let self else { return }
+                let data = await self.standalone.artworkData(forPlaylist: id)
+                self.ingestPlaylistArtwork(id: id, data: data)
+            }
+            return
+        }
         music.fetchArtwork(forPlaylist: id) { [weak self] data in
             guard let data else {
                 Task { @MainActor in self?.artworkInFlight.remove(id) }
@@ -167,6 +227,29 @@ final class MainViewModel {
         }
     }
 
+    /// Shared tail of the playlist-artwork path: decode small off-main, then
+    /// publish (used by both the AppleScript and standalone sources).
+    private func ingestPlaylistArtwork(id: String, data: Data?) {
+        guard let data else {
+            artworkInFlight.remove(id)
+            return
+        }
+        Task.detached(priority: .utility) {
+            let cg = Self.decodedThumbnail(from: data, maxPixel: 640)
+            let rgb = ArtworkColor.dominant(from: data)
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.artworkInFlight.remove(id)
+                if let cg {
+                    self.artwork[id] = NSImage(cgImage: cg, size: .zero)
+                }
+                if let rgb {
+                    self.dominant[id] = Color(.sRGB, red: rgb.red, green: rgb.green, blue: rgb.blue)
+                }
+            }
+        }
+    }
+
     func artworkImage(for id: String) -> NSImage? { artwork[id] }
     func dominantColor(for id: String) -> Color? { dominant[id] }
 
@@ -177,6 +260,14 @@ final class MainViewModel {
         guard trackArtworkCache.object(forKey: id as NSString) == nil,
               !trackArtworkInFlight.contains(id) else { return }
         trackArtworkInFlight.insert(id)
+        if isStandalone {
+            Task { [weak self] in
+                guard let self else { return }
+                let data = await self.standalone.artworkData(forTrack: id)
+                self.ingestTrackArtwork(id: id, data: data)
+            }
+            return
+        }
         music.fetchArtwork(forTrack: id, inPlaylist: playlistID) { [weak self] data in
             guard let data else {
                 Task { @MainActor in self?.trackArtworkInFlight.remove(id) }
@@ -197,6 +288,30 @@ final class MainViewModel {
                     if let rgb {
                         self.trackDominant[id] = Color(.sRGB, red: rgb.red, green: rgb.green, blue: rgb.blue)
                     }
+                }
+            }
+        }
+    }
+
+    /// Shared tail of the track-artwork path (both sources).
+    private func ingestTrackArtwork(id: String, data: Data?) {
+        guard let data else {
+            trackArtworkInFlight.remove(id)
+            return
+        }
+        Task.detached(priority: .utility) {
+            let cg = Self.decodedThumbnail(from: data, maxPixel: 400)
+            let rgb = ArtworkColor.dominant(from: data)
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.trackArtworkInFlight.remove(id)
+                if let cg {
+                    self.trackArtworkCache.setObject(NSImage(cgImage: cg, size: .zero),
+                                                     forKey: id as NSString)
+                    self.trackArtworkVersion &+= 1
+                }
+                if let rgb {
+                    self.trackDominant[id] = Color(.sRGB, red: rgb.red, green: rgb.green, blue: rgb.blue)
                 }
             }
         }
@@ -226,6 +341,18 @@ final class MainViewModel {
     private func fetchTracksIfNeeded(_ id: String) {
         guard tracks[id] == nil, !tracksInFlight.contains(id) else { return }
         tracksInFlight.insert(id)
+        if isStandalone {
+            Task { [weak self] in
+                guard let self else { return }
+                let list = await self.standalone.fetchTracks(forPlaylist: id)
+                self.tracksInFlight.remove(id)
+                self.tracks[id] = list ?? []
+                if list == nil {
+                    self.showToast(symbol: "exclamationmark.triangle", message: "Couldn't load tracks")
+                }
+            }
+            return
+        }
         music.fetchTracks(forPlaylist: id) { [weak self] result in
             Task { @MainActor in
                 guard let self else { return }
@@ -245,7 +372,13 @@ final class MainViewModel {
 
     /// Play a whole playlist and transition to the PLAYER state.
     func play(_ playlist: MusicPlaylist) {
-        music.playPlaylist(id: playlist.id, shuffle: false)
+        studio.flushEffectPlayback()
+        if isStandalone {
+            standalone.playPlaylist(id: playlist.id)
+        } else {
+            music.playPlaylist(id: playlist.id, shuffle: false)
+            confirmTransportSoon()
+        }
         withAnimation(ChromeMotion.spring) {
             state = .player(playlistID: playlist.id)
         }
@@ -253,7 +386,14 @@ final class MainViewModel {
 
     /// Play a single track within a playlist and transition to PLAYER.
     func playTrack(_ track: MusicTrack, inPlaylist playlistID: String) {
-        music.playTrack(id: track.id, inPlaylist: playlistID)
+        studio.flushEffectPlayback()
+        if isStandalone {
+            // Native queue start-at — no helper playlist hack needed.
+            standalone.playTrack(index: track.index, inPlaylist: playlistID)
+        } else {
+            music.playTrack(id: track.id, index: track.index, inPlaylist: playlistID)
+            confirmTransportSoon()
+        }
         withAnimation(ChromeMotion.spring) {
             state = .player(playlistID: playlistID)
         }
@@ -285,10 +425,92 @@ final class MainViewModel {
 
     // MARK: - Transport (delegates to MusicController)
 
-    func playPause() { music.playPause() }
-    func nextTrack() { music.nextTrack() }
-    func previousTrack() { music.previousTrack() }
-    func seek(toSeconds seconds: Double) { music.seek(toSeconds: seconds) }
+    func playPause() {
+        // While flow-held the source is ALREADY paused (muted, draining into
+        // our slowed queue) — toggle our own output instead of the source.
+        if studio.flowHolding {
+            studio.toggleOutputHold()
+            return
+        }
+        // Flip the published state NOW (button glyph, disc spin, needle creep
+        // all follow it); the gate holds until a poll/push confirms.
+        studio.notePlayPause()
+        if isStandalone {
+            standalone.playPause()
+        } else {
+            music.playPause()
+            confirmTransportSoon()
+        }
+    }
+
+    func nextTrack() {
+        studio.flushEffectPlayback()
+        if isStandalone {
+            standalone.next()
+        } else {
+            music.nextTrack()
+            confirmTransportSoon()
+        }
+    }
+
+    func previousTrack() {
+        studio.flushEffectPlayback()
+        if isStandalone {
+            standalone.previous()
+        } else {
+            music.previousTrack()
+            confirmTransportSoon()
+        }
+    }
+
+    func seek(toSeconds seconds: Double) {
+        // Arm the poll-race gate BEFORE dispatching: a stale poll must never
+        // land between the command send and the optimistic position write.
+        studio.noteSeek(toSeconds: seconds)
+        studio.flushEffectPlayback()
+        if isStandalone {
+            standalone.seek(toSeconds: seconds)
+        } else {
+            music.seek(toSeconds: seconds)
+        }
+    }
+
+    /// Two quick off-schedule polls after a transport command: the first
+    /// catches fast state flips (~0.4s), the second catches slower track
+    /// changes and the queue-playlist play (~1.2s) — instead of waiting out
+    /// the regular 2s tick.
+    private func confirmTransportSoon() {
+        Task { [studio] in
+            try? await Task.sleep(for: .milliseconds(400))
+            studio.refreshNowPlaying()
+            try? await Task.sleep(for: .milliseconds(800))
+            studio.refreshNowPlaying()
+        }
+    }
+
+    // MARK: - Catalog search (⌘K overlay)
+
+    /// Play a search result: drop any banked slowed audio, hand the catalog id
+    /// to the helper, and land on the PLAYER (mirrors `playTrack`). A search
+    /// play has no source playlist; back() falls through to the library.
+    func playSearchResult(_ song: CatalogSong) {
+        studio.flushEffectPlayback()
+        standalone.playSong(id: song.id)
+        withAnimation(ChromeMotion.spring) {
+            if case .player = state {} else {
+                state = .player(playlistID: lastSongGridPlaylistID ?? "")
+            }
+        }
+    }
+
+    // MARK: - Up Next queue
+
+    /// Jump the standalone queue to `entry`. Drop any banked slowed audio FIRST
+    /// (a jump changes the source track), then hand the entry id to the helper.
+    func jumpToQueueEntry(_ entry: PlayerQueueEntry) {
+        studio.flushEffectPlayback()
+        standalone.jumpToQueueEntry(id: entry.id)
+    }
 
     // MARK: - Toast
 

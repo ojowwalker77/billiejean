@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Developer ID signing (team 57249C654W) — pair with a
+         "Developer ID" provisioning profile for this App ID. -->
+    <key>com.apple.application-identifier</key>
+    <string>57249C654W.com.jow.billiejean.player</string>
+</dict>
+</plist>

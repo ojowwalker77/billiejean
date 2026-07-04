@@ -57,6 +57,54 @@ final class StudioViewModel {
     static let mainDefault = 0.6
     static let volumeDefault = 0.77
 
+    // MARK: - Effect mode (vinyl / slowed + reverb)
+
+    private static let effectModeDefaultsKey = "vinylfy.effectMode"
+
+    /// Active effect chain. The macro knobs remap per mode (slowed: MAIN =
+    /// speed, NOISE = reverb depth). Switching resets any user output-hold and
+    /// re-derives all engine parameters from the current knob positions.
+    var effectMode: HearItEngine.EffectMode = HearItEngine.EffectMode(
+        rawValue: UserDefaults.standard.string(forKey: StudioViewModel.effectModeDefaultsKey) ?? ""
+    ) ?? .vinyl {
+        didSet {
+            UserDefaults.standard.set(effectMode.rawValue, forKey: Self.effectModeDefaultsKey)
+            userHeldOutput = false
+            engine.outputPaused = false
+            engine.effectMode = effectMode
+            applyNoise()
+            applyMain()
+            applyVolume()
+        }
+    }
+
+    /// True while flow control has the source paused (slowed lead draining).
+    /// The listener still hears audio, so the UI must read this as "playing".
+    private(set) var flowHolding = false
+
+    /// User pressed pause while flow-held: the source is already paused, so we
+    /// halt OUR output instead of toggling the source (which would blast raw
+    /// unslowed audio). Cleared by the next user play.
+    private(set) var userHeldOutput = false
+
+    /// Set by MainViewModel: pause/resume the muted source app (AppleScript).
+    var flowHoldHandler: ((Bool) -> Void)?
+
+    /// User play/pause while flow-held: freeze/unfreeze our own output.
+    func toggleOutputHold() {
+        userHeldOutput.toggle()
+        engine.outputPaused = userHeldOutput
+        if let snap = snapshot {
+            snapshot = snap.replacingIsPlaying(with: !userHeldOutput)
+        }
+    }
+
+    /// Drop queued (stale) slowed audio across a seek or track jump.
+    func flushEffectPlayback() {
+        guard effectMode == .slowed else { return }
+        engine.flushPlayback()
+    }
+
     // MARK: - Now-playing
 
     private(set) var snapshot: NowPlayingSnapshot?
@@ -91,6 +139,7 @@ final class StudioViewModel {
     private init() {
         engine.parameters = parameters
         engine.bypass = bypass
+        engine.effectMode = effectMode
 
         // Route now-playing snapshots back onto the main actor.
         nowPlaying.snapshotHandler = { [weak self] snap in
@@ -98,13 +147,55 @@ final class StudioViewModel {
                 self?.ingest(snap)
             }
         }
+
+        // Flow control: the engine holds/releases the muted source as the
+        // slowed buffer lead crosses its watermarks.
+        engine.flowControlHandler = { [weak self] holding in
+            Task { @MainActor in
+                guard let self else { return }
+                self.flowHolding = holding
+                self.flowHoldHandler?(holding)
+            }
+        }
     }
 
     // MARK: - Lifecycle
 
     /// Route the engine to vinylize Apple Music only. Call BEFORE `start()`.
+    /// `vinylfy.tapTargetOverride` (a bundle id) redirects the tap — used to
+    /// point at the MusicKit player helper during the standalone transition.
     func setMusicTapTarget() {
-        engine.tapTarget = .bundle("com.apple.Music")
+        let override = UserDefaults.standard.string(forKey: "vinylfy.tapTargetOverride")
+        engine.tapTarget = .bundle(override ?? "com.apple.Music")
+    }
+
+    // MARK: - Standalone source (MusicKit helper)
+
+    /// True while snapshots come from the helper's pushed state instead of the
+    /// AppleScript poll. Switching retargets the tap (pipeline restart) and
+    /// silences/reawakens the poller.
+    private(set) var standaloneActive = false
+
+    func activateStandalone(_ active: Bool, helperBundleID: String) {
+        guard standaloneActive != active else { return }
+        standaloneActive = active
+        if active {
+            nowPlaying.stop()
+            engine.tapTarget = .bundle(helperBundleID)
+        } else {
+            engine.tapTarget = .bundle(
+                UserDefaults.standard.string(forKey: "vinylfy.tapTargetOverride") ?? "com.apple.Music"
+            )
+            nowPlaying.start()
+        }
+    }
+
+    /// Entry point for helper-pushed snapshots. The seek/play gates still
+    /// apply — pushes arrive at 1Hz, so one pre-command push can be in flight;
+    /// the gates absorb it and clear on the first agreeing push.
+    func ingestStandaloneSnapshot(_ snap: NowPlayingSnapshot) {
+        guard standaloneActive else { return }
+        ingest(snap)
     }
 
     /// Push macro defaults into the engine and auto-start (set-and-forget widget).
@@ -157,21 +248,41 @@ final class StudioViewModel {
     // MARK: - Macro mapping (read-modify-write)
 
     private func applyNoise() {
-        let n = Float(noise.clamped01)
-        var p = parameters
-        p.hissLevel = 2 * n
-        p.crackleRate = 8 * n
-        p.crackleIntensity = n == 0 ? 0 : 0.4 + 1.2 * n
-        parameters = p
+        switch effectMode {
+        case .vinyl:
+            let n = Float(noise.clamped01)
+            var p = parameters
+            p.hissLevel = 2 * n
+            p.crackleRate = 8 * n
+            p.crackleIntensity = n == 0 ? 0 : 0.4 + 1.2 * n
+            parameters = p
+        case .slowed:
+            // NOISE knob = reverb depth in slowed mode. Floor of 0.2 so the
+            // wash never fully disappears; big bright room for the wide tail.
+            var p = engine.slowedParameters
+            p.reverbMix = Float(0.2 + 0.55 * noise.clamped01)
+            p.roomSize = 0.90
+            p.damping = 0.32
+            engine.slowedParameters = p
+        }
     }
 
     private func applyMain() {
-        let m = Float(main.clamped01)
-        var p = parameters
-        p.drive = 0.5 * m
-        p.wowDepth = 1.6 * m
-        p.stereoWidth = 1 - 0.3 * m
-        parameters = p
+        switch effectMode {
+        case .vinyl:
+            let m = Float(main.clamped01)
+            var p = parameters
+            p.drive = 0.5 * m
+            p.wowDepth = 1.6 * m
+            p.stereoWidth = 1 - 0.3 * m
+            parameters = p
+        case .slowed:
+            // MAIN knob = tape speed in slowed mode: 0.97x (subtle) down to
+            // 0.83x (syrup). Default 0.6 lands near the sweet-spot ~0.89x.
+            var p = engine.slowedParameters
+            p.rate = 0.97 - 0.14 * main.clamped01
+            engine.slowedParameters = p
+        }
     }
 
     private func applyVolume() {
@@ -179,12 +290,118 @@ final class StudioViewModel {
         var p = parameters
         p.outputGain = 1.3 * v
         parameters = p
+        var s = engine.slowedParameters
+        s.outputGain = 1.3 * v
+        engine.slowedParameters = s
+    }
+
+    // MARK: - Pending seek (poll-race gate)
+
+    /// A seek is an async AppleScript; the 2s metadata poll runs on its own
+    /// queue. A poll landing between "seek dispatched" and "Music applied it"
+    /// still carries the PRE-seek position, which would yank the needle back
+    /// before the next poll corrects it. These fields arm a gate: while a seek
+    /// is in flight, stale polls are overridden with the extrapolated target
+    /// until Music confirms — or the gate expires, so a failed seek (Music
+    /// quit, stopped state) can't wedge the position.
+    private var pendingSeekTarget: Double?
+    private var pendingSeekInstant = Date.distantPast
+    private var pendingSeekDeadline = Date.distantPast
+    private var pendingSeekTrackKey: String?
+
+    /// How close a polled position must be to the extrapolated target to count
+    /// as "Music applied the seek". Scrubs shorter than this never glitched
+    /// visibly anyway, so accepting them immediately is harmless.
+    private static let seekConfirmTolerance: Double = 3.0
+
+    /// Call at the moment a seek command is dispatched. Optimistically moves
+    /// the published position to the target so the UI never sees the stale gap.
+    func noteSeek(toSeconds seconds: Double) {
+        pendingSeekTarget = seconds
+        pendingSeekInstant = .now
+        pendingSeekDeadline = .now.addingTimeInterval(5.0)
+        pendingSeekTrackKey = snapshot.map(Self.trackKey)
+        if let snap = snapshot {
+            snapshot = snap.replacingPosition(with: seconds)
+        }
+    }
+
+    /// While the gate is armed, decide whether an incoming poll reflects the
+    /// seek (accept it and disarm) or predates it (hold the extrapolated
+    /// target instead). Track change or deadline disarms unconditionally.
+    private func reconcilingPendingSeek(_ snap: NowPlayingSnapshot?) -> NowPlayingSnapshot? {
+        guard let target = pendingSeekTarget else { return snap }
+        guard let snap else {
+            pendingSeekTarget = nil
+            return nil
+        }
+        let now = Date.now
+        if now > pendingSeekDeadline || Self.trackKey(snap) != pendingSeekTrackKey {
+            pendingSeekTarget = nil
+            return snap
+        }
+        // Where playback should be if Music already applied the seek.
+        var expected = target + (snap.isPlaying ? now.timeIntervalSince(pendingSeekInstant) : 0)
+        if let duration = snap.durationSeconds { expected = min(expected, duration) }
+        if let pos = snap.positionSeconds, abs(pos - expected) <= Self.seekConfirmTolerance {
+            pendingSeekTarget = nil
+            return snap
+        }
+        return snap.replacingPosition(with: expected)
+    }
+
+    private static func trackKey(_ snap: NowPlayingSnapshot) -> String {
+        "\(snap.title)\u{1f}\(snap.artist)"
+    }
+
+    // MARK: - Pending play/pause (same poll race as seek)
+
+    /// Optimistic play/pause: the button must react instantly, but the polled
+    /// isPlaying can lag the AppleScript by a poll or two. Same gate shape as
+    /// the seek: hold the expected state until a poll agrees or the deadline
+    /// passes (a failed command must not wedge the transport UI).
+    private var pendingPlayTarget: Bool?
+    private var pendingPlayDeadline = Date.distantPast
+
+    /// Call when a play/pause command is dispatched. Flips the published state
+    /// immediately (disc spin, needle creep, and button glyph all follow it).
+    func notePlayPause() {
+        guard let snap = snapshot else { return }
+        let target = !snap.isPlaying
+        pendingPlayTarget = target
+        pendingPlayDeadline = .now.addingTimeInterval(4.0)
+        snapshot = snap.replacingIsPlaying(with: target)
+    }
+
+    private func reconcilingPendingPlay(_ snap: NowPlayingSnapshot?) -> NowPlayingSnapshot? {
+        guard let target = pendingPlayTarget else { return snap }
+        guard let snap else {
+            pendingPlayTarget = nil
+            return nil
+        }
+        if snap.isPlaying == target || Date.now > pendingPlayDeadline {
+            pendingPlayTarget = nil
+            return snap
+        }
+        return snap.replacingIsPlaying(with: target)
+    }
+
+    /// One immediate off-schedule metadata poll (post-transport confirmation).
+    func refreshNowPlaying() {
+        nowPlaying.pollNow()
     }
 
     // MARK: - Now-playing ingest
 
     private func ingest(_ snap: NowPlayingSnapshot?) {
-        snapshot = snap
+        var reconciled = reconcilingPendingPlay(reconcilingPendingSeek(snap))
+        // Flow-held source polls as "paused", but the listener is hearing our
+        // queued slowed audio — present it as playing (unless the user froze
+        // our output too).
+        if flowHolding, let held = reconciled {
+            reconciled = held.replacingIsPlaying(with: !userHeldOutput)
+        }
+        snapshot = reconciled
 
         let data = snap?.artworkPNGData
         let fingerprint = data?.hashValue
@@ -206,9 +423,10 @@ final class StudioViewModel {
 
     // MARK: - Derived state
 
-    /// The disc spins only when the engine runs AND playback is active.
+    /// The disc spins only when the engine runs AND playback is active. A
+    /// flow-held source counts as active — our queued audio is still playing.
     var isSpinning: Bool {
-        isRunning && (snapshot?.isPlaying ?? false)
+        isRunning && ((snapshot?.isPlaying ?? false) || (flowHolding && !userHeldOutput))
     }
 
     /// Base gradient color: artwork dominant, or the warm amber fallback.
@@ -232,5 +450,35 @@ final class StudioViewModel {
     func outputLevel() -> Float {
         let bins = engine.meters(maxBins: 4).outputLevels
         return bins.max() ?? 0
+    }
+}
+
+private extension NowPlayingSnapshot {
+    /// The same snapshot with only the position swapped (pending-seek gate).
+    func replacingPosition(with seconds: Double) -> NowPlayingSnapshot {
+        NowPlayingSnapshot(
+            title: title,
+            artist: artist,
+            genre: genre,
+            isPlaying: isPlaying,
+            positionSeconds: max(0, seconds),
+            durationSeconds: durationSeconds,
+            artworkPNGData: artworkPNGData,
+            source: source
+        )
+    }
+
+    /// The same snapshot with only the play state swapped (play/pause gate).
+    func replacingIsPlaying(with playing: Bool) -> NowPlayingSnapshot {
+        NowPlayingSnapshot(
+            title: title,
+            artist: artist,
+            genre: genre,
+            isPlaying: playing,
+            positionSeconds: positionSeconds,
+            durationSeconds: durationSeconds,
+            artworkPNGData: artworkPNGData,
+            source: source
+        )
     }
 }

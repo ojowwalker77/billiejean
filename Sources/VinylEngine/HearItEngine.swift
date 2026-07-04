@@ -52,6 +52,7 @@ public final class HearItEngine: @unchecked Sendable {
             processorLock.withLock {
                 currentBypass = newValue
                 processor?.isBypassed = newValue
+                slowedProcessor?.isBypassed = newValue
             }
         }
     }
@@ -65,6 +66,95 @@ public final class HearItEngine: @unchecked Sendable {
                 currentParameters = newValue
                 processor?.updateParameters(newValue)
             }
+        }
+    }
+
+    // MARK: - Effect mode (vinyl / slowed)
+
+    public enum EffectMode: String, Sendable, CaseIterable {
+        case vinyl
+        case slowed
+    }
+
+    /// Which effect chain processes the tap. Switching flushes queued playback
+    /// (slowed mode banks seconds of lead; vinyl must not inherit it) and drops
+    /// both processors so they rebuild with fresh state at the current rate.
+    public var effectMode: EffectMode {
+        get {
+            processorLock.withLock { currentEffectMode }
+        }
+        set {
+            let changed = processorLock.withLock { () -> Bool in
+                guard currentEffectMode != newValue else { return false }
+                currentEffectMode = newValue
+                processor = nil
+                slowedProcessor = nil
+                return true
+            }
+            if changed {
+                flushPlayback()
+            }
+        }
+    }
+
+    public var slowedParameters: SlowedParameters {
+        get {
+            processorLock.withLock { currentSlowedParameters }
+        }
+        set {
+            processorLock.withLock {
+                currentSlowedParameters = newValue
+                slowedProcessor?.updateParameters(newValue)
+            }
+        }
+    }
+
+    /// Fired (on an arbitrary queue) when the slowed buffer lead crosses the
+    /// watermarks: `true` = hold the source (pause upstream; it is muted while
+    /// tapped so the listener hears only our queued output), `false` = release.
+    public var flowControlHandler: (@Sendable (Bool) -> Void)? {
+        get { stateLock.withLock { _flowControlHandler } }
+        set { stateLock.withLock { _flowControlHandler = newValue } }
+    }
+
+    /// Whether flow control is currently holding the source paused. The UI
+    /// treats a flow-held source as "playing" — audio is still coming out.
+    public var isFlowHolding: Bool {
+        stateLock.withLock { flowHolding }
+    }
+
+    /// User-facing pause of OUR output while the source is flow-held (the
+    /// source is already paused; toggling it would resume audibly). Halting the
+    /// player freezes the render head, so queued sample times stay valid.
+    public var outputPaused: Bool {
+        get { stateLock.withLock { outputPausedFlag } }
+        set {
+            stateLock.withLock { outputPausedFlag = newValue }
+            playbackQueue.async { [weak self] in
+                guard let self, self.playerAttached, self.engine.isRunning else { return }
+                if newValue {
+                    self.player.pause()
+                } else if !self.player.isPlaying {
+                    self.player.play()
+                }
+            }
+        }
+    }
+
+    /// Drop everything queued but not yet rendered (seek/track-jump in slowed
+    /// mode: up to ~12s of stale lead would otherwise play out first). The next
+    /// processed buffer re-anchors scheduling; slowed DSP state resets so the
+    /// reverb tail and resampler ring don't smear across the jump.
+    public func flushPlayback() {
+        processorLock.withLock {
+            slowedProcessor = nil
+        }
+        playbackQueue.async { [weak self] in
+            guard let self else { return }
+            if self.playerAttached {
+                self.player.stop()
+            }
+            self.resetPlaybackQueueState()
         }
     }
 
@@ -118,6 +208,9 @@ public final class HearItEngine: @unchecked Sendable {
 
     private var tap: SystemAudioTap?
     private var processor: VinylProcessor?
+    private var slowedProcessor: SlowedProcessor?
+    private var currentEffectMode: EffectMode = .vinyl
+    private var currentSlowedParameters = SlowedParameters()
     private var poolFormat: AVAudioFormat?
     private var poolSlots: [PoolSlot] = []
     private var poolGeneration = 0
@@ -137,6 +230,17 @@ public final class HearItEngine: @unchecked Sendable {
     private var restartCount = 0
     private var pipelineGeneration = 0
     private var _statsHandler: (@Sendable (Stats) -> Void)?
+    private var _flowControlHandler: (@Sendable (Bool) -> Void)?
+    private var flowHolding = false
+    private var outputPausedFlag = false
+    /// playbackQueue-confined: polls the render head while flow-held so the
+    /// release fires even though no new input (and thus no schedule()) arrives.
+    private var flowDrainTimer: DispatchSourceTimer?
+    /// Slowed-mode watermarks, in seconds of scheduled lead beyond the render
+    /// head. Hold above high; release below low. Vinyl mode idles near the
+    /// ~85ms jitter lead and never crosses either.
+    private static let flowHoldHighWaterSeconds: Double = 12
+    private static let flowHoldLowWaterSeconds: Double = 3
 
     private var defaultOutputDeviceListener: AudioObjectPropertyListenerBlock?
     private var engineConfigurationObserver: NSObjectProtocol?
@@ -629,11 +733,13 @@ public final class HearItEngine: @unchecked Sendable {
         stateLock.withLock {
             scheduledBuffers = 0
         }
+        releaseFlowHold()
     }
 
     private func resetDSPState() {
         processorLock.withLock {
             processor = nil
+            slowedProcessor = nil
             currentSampleRate = 0
         }
     }
@@ -707,14 +813,29 @@ public final class HearItEngine: @unchecked Sendable {
         var didChangeFormat = false
 
         processorLock.lock()
-        if processor == nil || sampleRate != currentSampleRate {
-            let nextProcessor = VinylProcessor(sampleRate: sampleRate, parameters: currentParameters)
-            nextProcessor.isBypassed = currentBypass
-            processor = nextProcessor
+        if sampleRate != currentSampleRate {
+            processor = nil
+            slowedProcessor = nil
             currentSampleRate = sampleRate
             didChangeFormat = true
         }
-        let processed = processor?.process(buffer)
+        let processed: AVAudioPCMBuffer?
+        switch currentEffectMode {
+        case .vinyl:
+            if processor == nil {
+                let next = VinylProcessor(sampleRate: sampleRate, parameters: currentParameters)
+                next.isBypassed = currentBypass
+                processor = next
+            }
+            processed = processor?.process(buffer)
+        case .slowed:
+            if slowedProcessor == nil {
+                let next = SlowedProcessor(sampleRate: sampleRate, parameters: currentSlowedParameters)
+                next.isBypassed = currentBypass
+                slowedProcessor = next
+            }
+            processed = slowedProcessor?.process(buffer)
+        }
         processorLock.unlock()
 
         if didChangeFormat, debugLogging {
@@ -740,7 +861,7 @@ public final class HearItEngine: @unchecked Sendable {
             playbackFormat = buffer.format
         }
 
-        if !player.isPlaying {
+        if !player.isPlaying && !stateLock.withLock({ outputPausedFlag }) {
             player.play()
         }
 
@@ -765,6 +886,15 @@ public final class HearItEngine: @unchecked Sendable {
 
         let when = AVAudioTime(sampleTime: nextSampleTime, atRate: sampleRate)
         nextSampleTime += AVAudioFramePosition(buffer.frameLength)
+
+        // Slowed mode emits more output time than input time, so the scheduled
+        // lead grows without bound. The source is muted while tapped, so flow-
+        // control it: hold (pause) above the high watermark; the drain timer
+        // releases below the low one.
+        if let nodeTime = player.lastRenderTime, nodeTime.isSampleTimeValid,
+           let playerTime = player.playerTime(forNodeTime: nodeTime), playerTime.isSampleTimeValid {
+            updateFlowControl(leadFrames: nextSampleTime - playerTime.sampleTime, sampleRate: sampleRate)
+        }
 
         let stats = stateLock.withLock { () -> Stats in
             scheduledBuffers += 1
@@ -792,6 +922,67 @@ public final class HearItEngine: @unchecked Sendable {
 
         if let statsHandler = stateLock.withLock({ _statsHandler }) {
             statsHandler(stats)
+        }
+    }
+
+    /// playbackQueue only. Hold when the lead tops the high watermark; while
+    /// held, a 500ms timer polls the render head for the release (no input
+    /// arrives while the source is paused, so schedule() can't observe it).
+    private func updateFlowControl(leadFrames: AVAudioFramePosition, sampleRate: Double) {
+        guard sampleRate > 0 else { return }
+        let leadSeconds = Double(leadFrames) / sampleRate
+
+        if leadSeconds >= Self.flowHoldHighWaterSeconds {
+            let shouldFire = stateLock.withLock { () -> Bool in
+                guard !flowHolding else { return false }
+                flowHolding = true
+                return true
+            }
+            if shouldFire {
+                startFlowDrainTimer(sampleRate: sampleRate)
+                stateLock.withLock { _flowControlHandler }?(true)
+            }
+        }
+    }
+
+    /// playbackQueue only.
+    private func startFlowDrainTimer(sampleRate: Double) {
+        flowDrainTimer?.cancel()
+        let timer = DispatchSource.makeTimerSource(queue: playbackQueue)
+        timer.schedule(deadline: .now() + 0.5, repeating: 0.5)
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            // While the user has our output paused the lead isn't draining —
+            // and releasing would audibly resume the source. Wait.
+            guard !self.stateLock.withLock({ self.outputPausedFlag }) else { return }
+
+            var drained = self.nextSampleTime < 0
+            if !drained,
+               let nodeTime = self.player.lastRenderTime, nodeTime.isSampleTimeValid,
+               let playerTime = self.player.playerTime(forNodeTime: nodeTime), playerTime.isSampleTimeValid {
+                let leadSeconds = Double(self.nextSampleTime - playerTime.sampleTime) / sampleRate
+                drained = leadSeconds <= Self.flowHoldLowWaterSeconds
+            }
+            if drained {
+                self.releaseFlowHold()
+            }
+        }
+        flowDrainTimer = timer
+        timer.resume()
+    }
+
+    /// playbackQueue only. Idempotent; also called from resetPlaybackQueueState
+    /// so a stop/seek/mode-switch never strands the source paused.
+    private func releaseFlowHold() {
+        flowDrainTimer?.cancel()
+        flowDrainTimer = nil
+        let shouldFire = stateLock.withLock { () -> Bool in
+            guard flowHolding else { return false }
+            flowHolding = false
+            return true
+        }
+        if shouldFire {
+            stateLock.withLock { _flowControlHandler }?(false)
         }
     }
 

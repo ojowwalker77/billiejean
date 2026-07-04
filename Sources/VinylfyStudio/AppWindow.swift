@@ -76,6 +76,12 @@ final class AppWindow: NSPanel {
             case ",":
                 NotificationCenter.default.post(name: .billieSettings, object: nil)
                 return true
+            case "k", "K":
+                NotificationCenter.default.post(name: .billieSearch, object: nil)
+                return true
+            case "u", "U":
+                NotificationCenter.default.post(name: .billieUpNext, object: nil)
+                return true
             default:
                 break
             }

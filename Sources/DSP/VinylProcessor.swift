@@ -41,10 +41,20 @@ public final class VinylProcessor: @unchecked Sendable {
     private var rightLowPass: BiquadFilter
     private var wowFlutter: WowFlutter
     private var noise: NoiseGenerator
+    private let signalThreshold: Float = 1e-4
+    private let gateClosedThreshold: Float = 1e-4
+    private let gateHoldSamples: Int
+    private let gateAttackCoef: Float
+    private let gateReleaseCoef: Float
+    private var gateHoldCountdown: Int = 0
+    private var gateGain: Float = 0
 
     public init(sampleRate: Double, parameters: VinylParameters = VinylParameters()) {
         self.sampleRate = sampleRate
         self.parameters = parameters
+        gateHoldSamples = Int(1.5 * sampleRate)
+        gateAttackCoef = Float(exp(-1 / (0.06 * sampleRate)))
+        gateReleaseCoef = Float(exp(-1 / (0.35 * sampleRate)))
         leftHighPass = BiquadFilter.highPass(sampleRate: sampleRate, cutoff: 30)
         rightHighPass = BiquadFilter.highPass(sampleRate: sampleRate, cutoff: 30)
         leftLowShelf = BiquadFilter.lowShelf(sampleRate: sampleRate, cutoff: 150, gainDB: 1.5)
@@ -114,6 +124,8 @@ public final class VinylProcessor: @unchecked Sendable {
                     isInterleaved: inputIsInterleaved
                 )
                 : dryLeft
+            updateGate(dryLeft: dryLeft, dryRight: dryRight)
+
             var wetLeft = shape(dryLeft, drive: parameters.drive)
             var wetRight = shape(dryRight, drive: parameters.drive)
 
@@ -128,14 +140,16 @@ public final class VinylProcessor: @unchecked Sendable {
             wetLeft = wobbled.0
             wetRight = wobbled.1
 
-            let surface = noise.sample(
-                sampleRate: sampleRate,
-                hissLevel: parameters.hissLevel,
-                crackleRate: parameters.crackleRate,
-                crackleIntensity: parameters.crackleIntensity
-            )
-            wetLeft += surface.0
-            wetRight += surface.1
+            if gateHoldCountdown > 0 || gateGain >= gateClosedThreshold {
+                let surface = noise.sample(
+                    sampleRate: sampleRate,
+                    hissLevel: parameters.hissLevel,
+                    crackleRate: parameters.crackleRate,
+                    crackleIntensity: parameters.crackleIntensity
+                )
+                wetLeft += surface.0 * gateGain
+                wetRight += surface.1 * gateGain
+            }
 
             let narrowed = StereoWidth.apply(left: wetLeft, right: wetRight, width: parameters.stereoWidth)
             wetLeft = narrowed.0
@@ -201,6 +215,18 @@ public final class VinylProcessor: @unchecked Sendable {
             return channels[0][frame * stride + channel]
         }
         return channels[channel][frame]
+    }
+
+    private func updateGate(dryLeft: Float, dryRight: Float) {
+        if max(abs(dryLeft), abs(dryRight)) > signalThreshold {
+            gateHoldCountdown = gateHoldSamples
+        } else if gateHoldCountdown > 0 {
+            gateHoldCountdown -= 1
+        }
+
+        let target: Float = gateHoldCountdown > 0 ? 1 : 0
+        let coef = target > gateGain ? gateAttackCoef : gateReleaseCoef
+        gateGain = target + coef * (gateGain - target)
     }
 
     private func shape(_ sample: Float, drive: Float) -> Float {

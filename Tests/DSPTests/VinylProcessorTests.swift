@@ -6,23 +6,71 @@ final class VinylProcessorTests: XCTestCase {
     private let sampleRate = 48_000.0
     private let chunkFrames = 4_800
 
-    func testSilenceNoiseFloor() throws {
-        let processor = VinylProcessor(sampleRate: sampleRate)
-        var samples: [Float] = []
+    func testSilenceClosesSurfaceNoiseGate() throws {
+        let processor = VinylProcessor(sampleRate: sampleRate, parameters: noisyParameters)
+        var finalOutput: AVAudioPCMBuffer?
 
-        for _ in 0..<20 {
+        for _ in 0..<30 {
             let input = try makeBuffer(frames: chunkFrames)
-            let output = try XCTUnwrap(processor.process(input))
-            appendSamples(from: output, to: &samples)
+            finalOutput = try XCTUnwrap(processor.process(input))
         }
 
-        let skipped = Array(samples.dropFirst(chunkFrames * 2))
-        let rmsDB = decibels(rms(skipped))
-        let peak = skipped.map { abs($0) }.max() ?? 0
+        let output = try XCTUnwrap(finalOutput)
+        XCTAssertLessThan(peak(output), 1e-3)
+    }
 
-        XCTAssertGreaterThanOrEqual(rmsDB, -63)
-        XCTAssertLessThanOrEqual(rmsDB, -54)
-        XCTAssertLessThan(peak, Float(pow(10, -26.0 / 20.0)))
+    func testSurfaceNoiseReopensWhenSignalReturns() throws {
+        let noisyProcessor = VinylProcessor(sampleRate: sampleRate, parameters: noisyParameters)
+        let cleanProcessor = VinylProcessor(
+            sampleRate: sampleRate,
+            parameters: VinylParameters(hissLevel: 0, crackleRate: 0, crackleIntensity: 0)
+        )
+
+        for _ in 0..<30 {
+            let input = try makeBuffer(frames: chunkFrames)
+            _ = try XCTUnwrap(noisyProcessor.process(input))
+            _ = try XCTUnwrap(cleanProcessor.process(input))
+        }
+
+        var noisySamples: [Float] = []
+        var cleanSamples: [Float] = []
+
+        for chunk in 0..<2 {
+            let input = try makeBuffer(frames: chunkFrames) { frame, channel in
+                let absoluteFrame = chunk * self.chunkFrames + frame
+                let phase = 2 * Double.pi * 440 * Double(absoluteFrame) / self.sampleRate
+                return Float(sin(phase) * 0.1) * (channel == 0 ? 1 : 0.98)
+            }
+            let noisyOutput = try XCTUnwrap(noisyProcessor.process(input))
+            let cleanOutput = try XCTUnwrap(cleanProcessor.process(input))
+            appendSamples(from: noisyOutput, to: &noisySamples)
+            appendSamples(from: cleanOutput, to: &cleanSamples)
+        }
+
+        let residual = zip(noisySamples, cleanSamples).map { $0 - $1 }
+        XCTAssertGreaterThan(rms(residual), 4e-4)
+    }
+
+    func testSurfaceNoiseStaysOpenThroughShortSilence() throws {
+        let processor = VinylProcessor(sampleRate: sampleRate, parameters: noisyParameters)
+        var silentSamples: [Float] = []
+
+        for chunk in 0..<5 {
+            let input = try makeBuffer(frames: chunkFrames) { frame, channel in
+                let absoluteFrame = chunk * self.chunkFrames + frame
+                let phase = 2 * Double.pi * 440 * Double(absoluteFrame) / self.sampleRate
+                return Float(sin(phase) * 0.1) * (channel == 0 ? 1 : 0.98)
+            }
+            _ = try XCTUnwrap(processor.process(input))
+        }
+
+        for _ in 0..<5 {
+            let input = try makeBuffer(frames: chunkFrames)
+            let output = try XCTUnwrap(processor.process(input))
+            appendSamples(from: output, to: &silentSamples)
+        }
+
+        XCTAssertGreaterThan(silentSamples.map { abs($0) }.max() ?? 0, 1e-4)
     }
 
     func testUnityIshGainForSine() throws {
@@ -122,6 +170,24 @@ final class VinylProcessorTests: XCTestCase {
                 samples.append(data[channel][frame])
             }
         }
+    }
+
+    private var noisyParameters: VinylParameters {
+        VinylParameters(hissLevel: 2, crackleRate: 8, crackleIntensity: 1.5)
+    }
+
+    private func peak(_ buffer: AVAudioPCMBuffer) -> Float {
+        guard let data = buffer.floatChannelData else {
+            return 0
+        }
+
+        var value: Float = 0
+        for channel in 0..<Int(buffer.format.channelCount) {
+            for frame in 0..<Int(buffer.frameLength) {
+                value = max(value, abs(data[channel][frame]))
+            }
+        }
+        return value
     }
 
     private func rms(_ samples: [Float]) -> Float {

@@ -7,6 +7,7 @@ import AppKit
 struct CommandBar: View {
     @Bindable var model: MainViewModel
     @Binding var showSettings: Bool
+    @Binding var showSearch: Bool
     var showWidgetOnMinimize: Binding<Bool>
     /// Canvas glass: 0 = solid (and free — the desktop blur only mounts above 0).
     @AppStorage("billiejean.canvasTransparency") private var canvasTransparency = 0.0
@@ -94,11 +95,34 @@ struct CommandBar: View {
     // MARK: - Settings
 
     private var settingsCluster: some View {
+        HStack(spacing: WindowChrome.itemSpacing) {
+            // Catalog search — available only while the standalone bridge is up.
+            if model.standalone.isConnected {
+                ChromeIconButton(symbol: "magnifyingglass", help: "Search  ⌘K",
+                                 active: showSearch) {
+                    showSearch.toggle()
+                }
+            }
+            settingsButton
+        }
+    }
+
+    private var settingsButton: some View {
         ChromeIconButton(symbol: "gearshape", help: "Settings  ⌘,", active: showSettings) {
             showSettings.toggle()
         }
         .popover(isPresented: $showSettings, arrowEdge: .top) {
             GlassMenu {
+                GlassMenuRow(title: "Vinyl", checked: studio.effectMode == .vinyl) {
+                    studio.effectMode = .vinyl
+                }
+                GlassMenuRow(title: "Slowed + Reverb", checked: studio.effectMode == .slowed) {
+                    studio.effectMode = .slowed
+                }
+                Rectangle()
+                    .fill(Theme.Palette.separator)
+                    .frame(height: 1)
+                    .padding(.horizontal, 8)
                 GlassMenuToggleRow(title: "Show Widget on Minimize",
                                    isOn: showWidgetOnMinimize)
                 Rectangle()
