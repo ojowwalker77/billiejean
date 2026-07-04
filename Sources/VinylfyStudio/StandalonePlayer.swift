@@ -111,22 +111,39 @@ final class StandalonePlayer {
 
     // MARK: - Transport (fire-and-forget; state pushes confirm)
 
-    func play() { Task { try? await client.play() } }
-    func pause() { Task { try? await client.pause() } }
-    func playPause() { Task { try? await client.playPause() } }
-    func next() { Task { try? await client.next() } }
-    func previous() { Task { try? await client.previous() } }
-    func seek(toSeconds seconds: Double) { Task { try? await client.seek(seconds: seconds) } }
-    func holdSource() { Task { try? await client.holdSource() } }
-    func releaseSource() { Task { try? await client.releaseSource() } }
+    /// Errors from a command must never vanish (a swallowed play failure looks
+    /// exactly like "the button did nothing"). Logged + surfaced to the owner.
+    var commandFailureHandler: ((String) -> Void)?
+
+    private func send(_ label: String, _ op: @escaping () async throws -> Void) {
+        Task { [weak self] in
+            do {
+                try await op()
+            } catch {
+                print("DIAG standalone \(label) failed: \(error)")
+                await MainActor.run { self?.commandFailureHandler?(label) }
+            }
+        }
+    }
+
+    func play() { send("play") { [client] in try await client.play() } }
+    func pause() { send("pause") { [client] in try await client.pause() } }
+    func playPause() { send("playPause") { [client] in try await client.playPause() } }
+    func next() { send("next") { [client] in try await client.next() } }
+    func previous() { send("previous") { [client] in try await client.previous() } }
+    func seek(toSeconds seconds: Double) { send("seek") { [client] in try await client.seek(seconds: seconds) } }
+    func holdSource() { send("holdSource") { [client] in try await client.holdSource() } }
+    func releaseSource() { send("releaseSource") { [client] in try await client.releaseSource() } }
 
     func playPlaylist(id: String) {
-        Task { try? await client.playPlaylist(playlistId: id, startIndex: nil) }
+        send("playPlaylist") { [client] in try await client.playPlaylist(playlistId: id, startIndex: nil) }
     }
 
     func playTrack(index: Int, inPlaylist playlistID: String) {
         // Helper indices are 0-based queue offsets; MusicTrack.index is 1-based.
-        Task { try? await client.playPlaylist(playlistId: playlistID, startIndex: max(0, index - 1)) }
+        send("playTrack") { [client] in
+            try await client.playPlaylist(playlistId: playlistID, startIndex: max(0, index - 1))
+        }
     }
 
     // MARK: - Queue (Up Next)
@@ -136,7 +153,7 @@ final class StandalonePlayer {
     }
 
     func jumpToQueueEntry(id: String) {
-        Task { try? await client.jumpToQueueEntry(entryId: id) }
+        send("queueJump") { [client] in try await client.jumpToQueueEntry(entryId: id) }
     }
 
     // MARK: - Albums
@@ -161,7 +178,7 @@ final class StandalonePlayer {
     }
 
     func playAlbum(id: String, startIndex: Int? = nil) {
-        Task { try? await client.playAlbum(albumId: id, startIndex: startIndex) }
+        send("playAlbum") { [client] in try await client.playAlbum(albumId: id, startIndex: startIndex) }
     }
 
     // MARK: - Catalog search
@@ -171,7 +188,7 @@ final class StandalonePlayer {
     }
 
     func playSong(id: String) {
-        Task { try? await client.playSearchResult(songId: id) }
+        send("playSong") { [client] in try await client.playSearchResult(songId: id) }
     }
 
     // MARK: - Library (mapped to the AppleScript-era shapes)

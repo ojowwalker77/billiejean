@@ -37,6 +37,9 @@ final class MainViewModel {
         standalone.snapshotHandler = { [weak self] snap in
             self?.studio.ingestStandaloneSnapshot(snap)
         }
+        standalone.commandFailureHandler = { [weak self] label in
+            self?.showToast(symbol: "exclamationmark.triangle", message: "Player command failed (\(label))")
+        }
         standalone.connectionHandler = { [weak self] connected in
             guard let self else { return }
             self.studio.activateStandalone(connected, helperBundleID: StandalonePlayer.helperBundleID)

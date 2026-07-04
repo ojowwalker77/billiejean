@@ -48,8 +48,27 @@ final class PlayerCore {
             publish(currentState())
             return
         }
-        try await player.play()
+        try await startPlayback()
         publish(currentState())
+    }
+
+    /// play() with retries: a cold ApplicationMusicPlayer intermittently throws
+    /// MPMusicPlayerControllerErrorDomain error 1 ("not ready") right after a
+    /// queue change; a short back-off clears it.
+    private func startPlayback() async throws {
+        var lastError: Error?
+        for delayMs in [0, 400, 1200] {
+            if delayMs > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(delayMs) * 1_000_000)
+            }
+            do {
+                try await player.play()
+                return
+            } catch {
+                lastError = error
+            }
+        }
+        if let lastError { throw lastError }
     }
 
     func pause() {
@@ -99,7 +118,7 @@ final class PlayerCore {
         }
         isSourceHeld = false
         if intendedPlayback {
-            try await player.play()
+            try await startPlayback()
         }
         publish(currentState())
     }
@@ -132,7 +151,7 @@ final class PlayerCore {
         intendedPlayback = true
 
         if !isSourceHeld {
-            try await player.play()
+            try await startPlayback()
         }
         publish(currentState())
     }
@@ -150,7 +169,7 @@ final class PlayerCore {
         intendedPlayback = true
 
         if !isSourceHeld {
-            try await player.play()
+            try await startPlayback()
         }
         publish(currentState())
     }
@@ -168,7 +187,7 @@ final class PlayerCore {
         intendedPlayback = true
 
         if !isSourceHeld {
-            try await player.play()
+            try await startPlayback()
         }
         publish(currentState())
     }
@@ -179,7 +198,7 @@ final class PlayerCore {
         intendedPlayback = true
 
         if !isSourceHeld {
-            try await player.play()
+            try await startPlayback()
         }
         publish(currentState())
     }

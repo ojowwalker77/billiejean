@@ -1,7 +1,11 @@
 import Foundation
 
 public enum PlayerBridge {
-    public static let defaultSocketPath = NSString(string: "~/Library/Application Support/billiejean/player.sock").expandingTildeInPath
+    /// BILLIEJEAN_SOCKET overrides the bridge path (both helper and client
+    /// honor it) so a test helper can run beside the production one.
+    public static let defaultSocketPath =
+        ProcessInfo.processInfo.environment["BILLIEJEAN_SOCKET"]
+        ?? NSString(string: "~/Library/Application Support/billiejean/player.sock").expandingTildeInPath
 
     public static func defaultSocketURL() -> URL {
         URL(fileURLWithPath: defaultSocketPath)

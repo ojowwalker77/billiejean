@@ -4,6 +4,7 @@ import AudioCapture
 import CoreAudio
 import DSP
 import Foundation
+import OSLog
 
 @available(macOS 14.2, *)
 public final class HearItEngine: @unchecked Sendable {
@@ -92,6 +93,8 @@ public final class HearItEngine: @unchecked Sendable {
                 return true
             }
             if changed {
+                diagLog.log("effect_mode_switch mode=\(newValue.rawValue, privacy: .public)")
+                print("DIAG effect_mode_switch mode=\(newValue.rawValue)")
                 flushPlayback()
             }
         }
@@ -186,6 +189,8 @@ public final class HearItEngine: @unchecked Sendable {
                 return running
             }
             if shouldRestart {
+                diagLog.log("tap_retarget \(String(describing: newValue), privacy: .public)")
+            print("DIAG tap_retarget \(String(describing: newValue))")
                 schedulePipelineRestart(reason: .targetApp)
             }
         }
@@ -261,6 +266,10 @@ public final class HearItEngine: @unchecked Sendable {
     private var inputMeterRing = MeterRing(capacity: 4_096)
     private var outputMeterRing = MeterRing(capacity: 4_096)
     private var meterSampleRate: Double = 0
+
+    /// Pipeline diagnostics (visible via `log show`); throttled per ~5s.
+    private let diagLog = Logger(subsystem: "com.vinylfy.app", category: "engine")
+    private var diagBufferCount = 0
 
     public init(debugLogging: Bool = false) {
         self.debugLogging = debugLogging
@@ -820,7 +829,8 @@ public final class HearItEngine: @unchecked Sendable {
             didChangeFormat = true
         }
         let processed: AVAudioPCMBuffer?
-        switch currentEffectMode {
+        let mode = currentEffectMode
+        switch mode {
         case .vinyl:
             if processor == nil {
                 let next = VinylProcessor(sampleRate: sampleRate, parameters: currentParameters)
@@ -836,7 +846,14 @@ public final class HearItEngine: @unchecked Sendable {
             }
             processed = slowedProcessor?.process(buffer)
         }
+        let rate = currentEffectMode == .slowed ? currentSlowedParameters.rate : 1
         processorLock.unlock()
+
+        diagBufferCount += 1
+        if diagBufferCount % 500 == 1 {
+            diagLog.log("process mode=\(mode.rawValue, privacy: .public) rate=\(rate, format: .fixed(precision: 2)) in=\(buffer.frameLength) out=\(processed?.frameLength ?? 0) bypass=\(self.currentBypass)")
+            print("DIAG process mode=\(mode.rawValue) rate=\(rate) in=\(buffer.frameLength) out=\(processed?.frameLength ?? 0) bypass=\(currentBypass)")
+        }
 
         if didChangeFormat, debugLogging {
             print("Tap format: \(Int(sampleRate)) Hz, \(buffer.format.channelCount) channels")
