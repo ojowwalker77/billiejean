@@ -205,7 +205,9 @@ final class MainViewModel {
                         }
                     }
                 }
-                guard scope == self.libraryScope else { return }
+                // The source or scope may have changed while we fetched —
+                // a stale result must never overwrite the live wall.
+                guard self.isStandalone, scope == self.libraryScope else { return }
                 self.isLoadingPlaylists = false
                 self.playlists = lists ?? []
                 self.musicNotRunning = false
@@ -218,6 +220,10 @@ final class MainViewModel {
         music.fetchPlaylists { [weak self] result in
             Task { @MainActor in
                 guard let self else { return }
+                // AppleScript fetches are SLOW; standalone may have connected
+                // while this was in flight. Its ids are poison for the helper —
+                // drop the stale result (the connect handler refetched already).
+                guard !self.isStandalone else { return }
                 self.isLoadingPlaylists = false
                 switch result {
                 case .success(let lists):
@@ -418,6 +424,7 @@ final class MainViewModel {
                     list = await self.standalone.fetchTracks(forPlaylist: id)
                 }
                 self.tracksInFlight.remove(id)
+                guard self.isStandalone else { return }
                 self.tracks[id] = list ?? []
                 if list == nil {
                     self.showToast(symbol: "exclamationmark.triangle", message: "Couldn't load tracks")
@@ -429,6 +436,8 @@ final class MainViewModel {
             Task { @MainActor in
                 guard let self else { return }
                 self.tracksInFlight.remove(id)
+                // Stale-source guard (see refreshPlaylists).
+                guard !self.isStandalone else { return }
                 switch result {
                 case .success(let list):
                     self.tracks[id] = list
