@@ -225,6 +225,7 @@ final class StudioViewModel {
                     if !silent {
                         self.watchdogRestartsWithoutRecovery = 0
                         self.setCaptureFault(false)
+                        self.engine.noteCaptureRecovered()
                     }
                 }
                 if silentTicks >= 2, Date.now.timeIntervalSince(self.lastWatchdogRestart) > 6 {

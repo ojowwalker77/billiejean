@@ -95,6 +95,44 @@ public final class SystemAudioTap: @unchecked Sendable {
         }
     }
 
+    /// Re-point a running `.processes` tap at a new process-object set by
+    /// writing the tap description IN PLACE. No aggregate/tap teardown — the
+    /// teardown path can wedge inside coreaudiod when a tapped process died
+    /// abruptly, starving every queued rebuild behind it. Returns false when
+    /// the tap isn't running (caller falls back to a full pipeline restart).
+    public func updateProcesses(_ processObjectIDs: [AudioObjectID]) -> Bool {
+        queue.sync {
+            guard state == .running, tapID != 0, !processObjectIDs.isEmpty else { return false }
+            guard case .processes = scope else { return false }
+
+            let description = CATapDescription(stereoMixdownOfProcesses: processObjectIDs)
+            if let uuidString = tapUUIDString, let uuid = UUID(uuidString: uuidString) {
+                description.uuid = uuid
+            }
+            description.muteBehavior = .mutedWhenTapped
+
+            var address = AudioObjectPropertyAddress(
+                mSelector: kAudioTapPropertyDescription,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            var descriptionRef: CATapDescription? = description
+            let status = AudioObjectSetPropertyData(
+                tapID,
+                &address,
+                0,
+                nil,
+                UInt32(MemoryLayout<CATapDescription?>.size),
+                &descriptionRef
+            )
+            if status != noErr {
+                logger.error("tap_description_update_failed status=\(status, privacy: .public)")
+                return false
+            }
+            return true
+        }
+    }
+
     public func stop() {
         var didStop = false
         queue.sync {

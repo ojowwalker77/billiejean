@@ -636,12 +636,38 @@ public final class HearItEngine: @unchecked Sendable {
     }
 
     /// CoreAudio process taps bind the stream set present at creation; a
-    /// stream that appears later (MusicKit starting in an already-tapped
-    /// helper) is never captured. Rebuilding the pipeline rebinds the tap
-    /// against the live streams.
+    /// renderer that appears later (RemotePlayerService spawning on first
+    /// play) is never captured. Tier 1: re-point the LIVE tap via a
+    /// description write — no teardown, no coreaudiod wedge, no audio gap.
+    /// Tier 2 (refresh already tried and silence persisted, or no live tap):
+    /// full pipeline rebuild.
+    private var lastRecoveryWasRefresh = false
+
     public func restartForSilenceRecovery() {
+        let target = stateLock.withLock { currentTapTarget }
+        let alreadyRefreshed = stateLock.withLock { lastRecoveryWasRefresh }
+
+        if case .bundleWithMediaServices(let bundleIdentifier) = target, !alreadyRefreshed {
+            var objects = Self.processObjectIDs(forBundleIdentifier: bundleIdentifier)
+            let media = SystemAudioTap.processObjectIDs(matchingBundleSubstring: "RemotePlayerService")
+            objects.append(contentsOf: media.filter { !objects.contains($0) })
+            if !objects.isEmpty,
+               let liveTap = stateLock.withLock({ tap }),
+               liveTap.updateProcesses(objects) {
+                stateLock.withLock { lastRecoveryWasRefresh = true }
+                print("DIAG tap_refreshed objects=\(objects)")
+                return
+            }
+        }
+
+        stateLock.withLock { lastRecoveryWasRefresh = false }
         print("DIAG silence_watchdog_restart")
         schedulePipelineRestart(reason: .targetApp)
+    }
+
+    /// Capture produced real signal again — next incident starts at tier 1.
+    public func noteCaptureRecovered() {
+        stateLock.withLock { lastRecoveryWasRefresh = false }
     }
 
     public func meters(maxBins: Int) -> Meters {
