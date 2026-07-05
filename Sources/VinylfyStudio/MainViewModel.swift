@@ -69,6 +69,28 @@ final class MainViewModel {
 
     // MARK: - Library
 
+    /// What the sleeve wall shows. Albums exist only on the standalone bridge;
+    /// they ride the whole playlist pipeline as `album:`-prefixed ids.
+    enum LibraryScope: String {
+        case playlists
+        case albums
+    }
+
+    var libraryScope: LibraryScope = .playlists {
+        didSet {
+            guard oldValue != libraryScope else { return }
+            playlists = []
+            refreshPlaylists()
+        }
+    }
+
+    private static let albumIDPrefix = "album:"
+
+    /// The bare MusicKit album id when this wall id is an album, else nil.
+    private static func albumID(_ id: String) -> String? {
+        id.hasPrefix(albumIDPrefix) ? String(id.dropFirst(albumIDPrefix.count)) : nil
+    }
+
     private(set) var playlists: [MusicPlaylist] = []
     private(set) var isLoadingPlaylists = false
     private(set) var musicNotRunning = false
@@ -139,9 +161,26 @@ final class MainViewModel {
     func refreshPlaylists() {
         isLoadingPlaylists = true
         if isStandalone {
+            let scope = libraryScope
             Task { [weak self] in
                 guard let self else { return }
-                let lists = await self.standalone.fetchPlaylists()
+                let lists: [MusicPlaylist]?
+                switch scope {
+                case .playlists:
+                    lists = await self.standalone.fetchPlaylists()
+                case .albums:
+                    lists = (await self.standalone.fetchAlbums()).map { albums in
+                        albums.map {
+                            MusicPlaylist(
+                                id: Self.albumIDPrefix + $0.id,
+                                name: $0.title,
+                                trackCount: $0.trackCount,
+                                durationSeconds: nil
+                            )
+                        }
+                    }
+                }
+                guard scope == self.libraryScope else { return }
                 self.isLoadingPlaylists = false
                 self.playlists = lists ?? []
                 self.musicNotRunning = false
@@ -347,7 +386,12 @@ final class MainViewModel {
         if isStandalone {
             Task { [weak self] in
                 guard let self else { return }
-                let list = await self.standalone.fetchTracks(forPlaylist: id)
+                let list: [MusicTrack]?
+                if let albumID = Self.albumID(id) {
+                    list = await self.standalone.fetchAlbumTracks(albumId: albumID)
+                } else {
+                    list = await self.standalone.fetchTracks(forPlaylist: id)
+                }
                 self.tracksInFlight.remove(id)
                 self.tracks[id] = list ?? []
                 if list == nil {
@@ -377,7 +421,11 @@ final class MainViewModel {
     func play(_ playlist: MusicPlaylist) {
         studio.flushEffectPlayback()
         if isStandalone {
-            standalone.playPlaylist(id: playlist.id)
+            if let albumID = Self.albumID(playlist.id) {
+                standalone.playAlbum(id: albumID)
+            } else {
+                standalone.playPlaylist(id: playlist.id)
+            }
         } else {
             music.playPlaylist(id: playlist.id, shuffle: false)
             confirmTransportSoon()
@@ -392,7 +440,11 @@ final class MainViewModel {
         studio.flushEffectPlayback()
         if isStandalone {
             // Native queue start-at — no helper playlist hack needed.
-            standalone.playTrack(index: track.index, inPlaylist: playlistID)
+            if let albumID = Self.albumID(playlistID) {
+                standalone.playAlbum(id: albumID, startIndex: max(0, track.index - 1))
+            } else {
+                standalone.playTrack(index: track.index, inPlaylist: playlistID)
+            }
         } else {
             music.playTrack(id: track.id, index: track.index, inPlaylist: playlistID)
             confirmTransportSoon()

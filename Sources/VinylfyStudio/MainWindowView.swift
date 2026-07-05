@@ -247,25 +247,33 @@ struct LibraryCanvas: View {
         if model.musicNotRunning && model.playlists.isEmpty {
             emptyState
         } else {
-            ScrollView {
-                LazyVGrid(columns: columns, spacing: 34) {
-                    ForEach(model.playlists) { playlist in
-                        SleeveCell(
-                            title: playlist.name,
-                            subtitle: "\(playlist.trackCount) track\(playlist.trackCount == 1 ? "" : "s")",
-                            artwork: model.artworkImage(for: playlist.id),
-                            onOpen: { model.openSongGrid(playlist) },
-                            onPlay: { model.play(playlist) },
-                            onAppear: { model.loadArtwork(for: playlist) }
-                        )
+            ZStack(alignment: .top) {
+                ScrollView {
+                    LazyVGrid(columns: columns, spacing: 34) {
+                        ForEach(model.playlists) { playlist in
+                            SleeveCell(
+                                title: playlist.name,
+                                subtitle: "\(playlist.trackCount) track\(playlist.trackCount == 1 ? "" : "s")",
+                                artwork: model.artworkImage(for: playlist.id),
+                                onOpen: { model.openSongGrid(playlist) },
+                                onPlay: { model.play(playlist) },
+                                onAppear: { model.loadArtwork(for: playlist) }
+                            )
+                        }
                     }
+                    .padding(.horizontal, 40)
+                    // Clear of top pills (plus the scope pill) and bottom command bar.
+                    .padding(.top, WindowChrome.pillHeight + WindowChrome.edgeInset * 2)
+                    .padding(.bottom, WindowChrome.panelBottomClearance + WindowChrome.edgeInset)
                 }
-                .padding(.horizontal, 40)
-                // Clear of top pills and bottom command bar.
-                .padding(.top, WindowChrome.pillHeight + WindowChrome.edgeInset * 2)
-                .padding(.bottom, WindowChrome.panelBottomClearance + WindowChrome.edgeInset)
+                .scrollIndicators(.never)
+
+                // Library scope — albums exist only on the standalone bridge.
+                if model.standalone.isConnected {
+                    LibraryScopePill(scope: $model.libraryScope)
+                        .padding(.top, WindowChrome.edgeInset)
+                }
             }
-            .scrollIndicators(.never)
         }
     }
 
@@ -285,6 +293,45 @@ struct LibraryCanvas: View {
                 .padding(.top, 4)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// Two-segment scope switch (PLAYLISTS / ALBUMS) as one chrome pill. The
+/// active segment is the cluster's single accent element.
+@available(macOS 14.2, *)
+struct LibraryScopePill: View {
+    @Binding var scope: MainViewModel.LibraryScope
+
+    var body: some View {
+        HStack(spacing: 2) {
+            segment("PLAYLISTS", .playlists)
+            segment("ALBUMS", .albums)
+        }
+        .padding(3)
+        .chromePill()
+    }
+
+    private func segment(_ label: String, _ value: MainViewModel.LibraryScope) -> some View {
+        let active = scope == value
+        return Button {
+            guard !active else { return }
+            Haptics.tap()
+            scope = value
+        } label: {
+            Text(label)
+                .font(WindowChrome.captionFont)
+                .tracking(1.2)
+                .foregroundStyle(active ? Theme.Palette.accent : Theme.Palette.printedInk)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: WindowChrome.inBarHoverRadius, style: .continuous)
+                        .fill(active ? Theme.Palette.hoverWash : .clear)
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .animation(ChromeMotion.hover, value: active)
     }
 }
 
