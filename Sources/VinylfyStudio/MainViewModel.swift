@@ -49,8 +49,11 @@ final class MainViewModel {
                 // last-client-disconnect suspenders).
                 self.standalone.releaseSource()
             }
-            // Refresh the wall from whichever library source is now live.
-            self.refreshPlaylists()
+            // The two sources use INCOMPATIBLE ids (AppleScript persistent IDs
+            // vs MusicKit item ids). Anything derived from the old source —
+            // wall, track caches, an open grid — is poison for the new one:
+            // drop it all and rebuild from the live source.
+            self.resetLibraryForSourceSwap()
         }
     }
 
@@ -161,6 +164,22 @@ final class MainViewModel {
 
     func loadPlaylistsIfNeeded() {
         guard playlists.isEmpty, !isLoadingPlaylists else { return }
+        refreshPlaylists()
+    }
+
+    /// Backend swap (standalone connect/disconnect): every cached id belongs
+    /// to the old source. Clear caches, pop to the wall, refetch.
+    private func resetLibraryForSourceSwap() {
+        playlists = []
+        tracks = [:]
+        tracksInFlight = []
+        artwork = [:]
+        dominant = [:]
+        artworkInFlight = []
+        lastSongGridPlaylistID = nil
+        if state != .library {
+            backToLibrary()
+        }
         refreshPlaylists()
     }
 
