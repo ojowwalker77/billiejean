@@ -109,6 +109,25 @@ public final class PlayerHelperClient: @unchecked Sendable {
     }
 
     @discardableResult
+    public func playTrackList(
+        containerId: String,
+        containerKind: TrackListContainerKind,
+        trackIds: [String],
+        startIndex: Int
+    ) async throws -> OKResult {
+        try await request(
+            .queuePlayTrackList,
+            params: PlayTrackListParams(
+                containerId: containerId,
+                containerKind: containerKind,
+                trackIds: trackIds,
+                startIndex: startIndex
+            ),
+            as: OKResult.self
+        )
+    }
+
+    @discardableResult
     public func playSearchResult(songId: String) async throws -> OKResult {
         try await request(
             .queuePlaySearchResult,

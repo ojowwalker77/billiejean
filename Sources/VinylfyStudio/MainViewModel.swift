@@ -43,6 +43,12 @@ final class MainViewModel {
         standalone.connectionHandler = { [weak self] connected in
             guard let self else { return }
             self.studio.activateStandalone(connected, helperBundleID: StandalonePlayer.helperBundleID)
+            if connected {
+                // A fresh engine has no banked lead: clear any hold a previous
+                // app instance left on the helper (belt to the helper's own
+                // last-client-disconnect suspenders).
+                self.standalone.releaseSource()
+            }
             // Refresh the wall from whichever library source is now live.
             self.refreshPlaylists()
         }

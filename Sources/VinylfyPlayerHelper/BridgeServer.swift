@@ -106,7 +106,18 @@ final class BridgeServer: @unchecked Sendable {
     fileprivate func remove(connection: BridgeConnection) {
         connectionLock.lock()
         connections[connection.fd] = nil
+        let isLast = connections.isEmpty
         connectionLock.unlock()
+
+        // A flow-control hold is only meaningful while its holder lives. When
+        // the last client drops (app quit/relaunch), a lingering hold would
+        // silently swallow every future play command (observed as "clicking a
+        // track does nothing"). Clear to a clean paused idle.
+        if isLast {
+            Task { @MainActor [core] in
+                core.clearHoldForDisconnectedClient()
+            }
+        }
     }
 
     @MainActor
@@ -162,6 +173,15 @@ final class BridgeServer: @unchecked Sendable {
         case .queuePlayPlaylist:
             let params = try request.params.decoded(as: PlayPlaylistParams.self)
             try await core.playPlaylist(playlistId: params.playlistId, startIndex: params.startIndex)
+            return try BridgeResponse(id: request.id, result: OKResult())
+        case .queuePlayTrackList:
+            let params = try request.params.decoded(as: PlayTrackListParams.self)
+            try await core.playTrackList(
+                containerId: params.containerId,
+                containerKind: params.containerKind,
+                trackIds: params.trackIds,
+                startIndex: params.startIndex
+            )
             return try BridgeResponse(id: request.id, result: OKResult())
         case .queuePlaySearchResult:
             let params = try request.params.decoded(as: PlaySearchResultParams.self)

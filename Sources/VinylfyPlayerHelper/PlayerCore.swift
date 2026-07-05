@@ -111,6 +111,16 @@ final class PlayerCore {
         publish(currentState())
     }
 
+    /// The controlling app vanished (last bridge client dropped). Do NOT
+    /// resume (unmuted raw audio); just clear the hold so the next app
+    /// instance starts from a clean paused idle.
+    func clearHoldForDisconnectedClient() {
+        guard isSourceHeld else { return }
+        isSourceHeld = false
+        intendedPlayback = false
+        publish(currentState())
+    }
+
     func releaseSource() async throws {
         guard isSourceHeld else {
             publish(currentState())
@@ -184,6 +194,46 @@ final class PlayerCore {
         let boundedIndex = min(max(startIndex ?? 0, 0), tracks.count - 1)
         let startTrack = tracks[boundedIndex]
         player.queue = ApplicationMusicPlayer.Queue(for: tracks, startingAt: startTrack)
+        intendedPlayback = true
+
+        if !isSourceHeld {
+            try await startPlayback()
+        }
+        publish(currentState())
+    }
+
+    func playTrackList(
+        containerId: String,
+        containerKind: TrackListContainerKind,
+        trackIds: [String],
+        startIndex: Int
+    ) async throws {
+        let tracks: [Track]
+        switch containerKind {
+        case .playlist:
+            let playlist = try await libraryPlaylist(id: containerId).with(.tracks)
+            tracks = Array(playlist.tracks ?? [])
+        case .album:
+            let album = try await libraryAlbum(id: containerId).with(.tracks)
+            tracks = Array(album.tracks ?? [])
+        }
+
+        var tracksByID = Dictionary(grouping: tracks, by: { $0.id.rawValue })
+        let reordered: [Track] = trackIds.compactMap { id in
+            guard var matches = tracksByID[id], !matches.isEmpty else {
+                return nil
+            }
+            let track = matches.removeFirst()
+            tracksByID[id] = matches
+            return track
+        }
+        guard !reordered.isEmpty else {
+            throw PlayerCoreError.notFound("Track list has no playable tracks: \(containerId)")
+        }
+
+        let boundedIndex = min(max(startIndex, 0), reordered.count - 1)
+        let startTrack = reordered[boundedIndex]
+        player.queue = ApplicationMusicPlayer.Queue(for: reordered, startingAt: startTrack)
         intendedPlayback = true
 
         if !isSourceHeld {

@@ -42,6 +42,7 @@ public enum PlayerBridgeMethod: String, Codable, CaseIterable, Sendable {
     case queueJump = "queue.jump"
     case queuePlayAlbum = "queue.playAlbum"
     case queuePlayPlaylist = "queue.playPlaylist"
+    case queuePlayTrackList = "queue.playTrackList"
     case queuePlaySearchResult = "queue.playSearchResult"
     case libraryAlbums = "library.albums"
     case libraryAlbumTracks = "library.albumTracks"

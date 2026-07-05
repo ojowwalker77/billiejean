@@ -40,6 +40,30 @@ public struct PlayAlbumParams: Codable, Equatable, Sendable {
     }
 }
 
+public enum TrackListContainerKind: String, Codable, Equatable, Sendable {
+    case playlist
+    case album
+}
+
+public struct PlayTrackListParams: Codable, Equatable, Sendable {
+    public let containerId: String
+    public let containerKind: TrackListContainerKind
+    public let trackIds: [String]
+    public let startIndex: Int
+
+    public init(
+        containerId: String,
+        containerKind: TrackListContainerKind,
+        trackIds: [String],
+        startIndex: Int
+    ) {
+        self.containerId = containerId
+        self.containerKind = containerKind
+        self.trackIds = trackIds
+        self.startIndex = startIndex
+    }
+}
+
 public struct PlaySearchResultParams: Codable, Equatable, Sendable {
     public let songId: String
 

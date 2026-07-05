@@ -20,6 +20,15 @@ struct PlayerBridgeProtocolTests {
             (.queueJump, QueueJumpParams(entryId: "entry-1").bridgeJSONValue()),
             (.queuePlayAlbum, PlayAlbumParams(albumId: "album-1", startIndex: 2).bridgeJSONValue()),
             (.queuePlayPlaylist, PlayPlaylistParams(playlistId: "playlist-1", startIndex: 3).bridgeJSONValue()),
+            (
+                .queuePlayTrackList,
+                PlayTrackListParams(
+                    containerId: "playlist-1",
+                    containerKind: .playlist,
+                    trackIds: ["track-3", "track-1", "track-2"],
+                    startIndex: 1
+                ).bridgeJSONValue()
+            ),
             (.queuePlaySearchResult, PlaySearchResultParams(songId: "song-1").bridgeJSONValue()),
             (.libraryAlbums, EmptyParams().bridgeJSONValue()),
             (.libraryAlbumTracks, AlbumTracksParams(albumId: "album-1").bridgeJSONValue()),
@@ -83,12 +92,14 @@ struct PlayerBridgeProtocolTests {
         let albumsResponse = try BridgeResponse(id: 12, result: albums)
         let albumTracksResponse = try BridgeResponse(id: 13, result: tracks)
         let playAlbumResponse = try BridgeResponse(id: 14, result: OKResult())
+        let playTrackListResponse = try BridgeResponse(id: 15, result: OKResult())
 
         #expect(try roundTripResult(queueEntriesResponse, as: QueueEntriesResult.self) == queueEntries)
         #expect(try roundTripResult(queueJumpResponse, as: OKResult.self) == OKResult())
         #expect(try roundTripResult(albumsResponse, as: AlbumsResult.self) == albums)
         #expect(try roundTripResult(albumTracksResponse, as: PlaylistTracksResult.self) == tracks)
         #expect(try roundTripResult(playAlbumResponse, as: OKResult.self) == OKResult())
+        #expect(try roundTripResult(playTrackListResponse, as: OKResult.self) == OKResult())
     }
 
     @Test("state event round-trips")
