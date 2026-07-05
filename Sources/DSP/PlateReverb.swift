@@ -24,16 +24,34 @@ public final class PlateReverb: @unchecked Sendable {
     private var dampingValue: Float
     private var mixValue: Float
 
+    /// Pre-delay: the silent gap before the first reflection. THE cue that
+    /// separates "cathedral / large hall" from "plate in the next room".
+    private var predelayLeft: [Float]
+    private var predelayRight: [Float]
+    private var predelayIndex = 0
+
     private static let combTunings = [1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617]
     private static let allpassTunings = [556, 441, 341, 225]
     private static let stereoSpread = 23
     private static let inputGain: Float = 0.08
 
-    public init(sampleRate: Double, roomSize: Float = 0.84, damping: Float = 0.45, mix: Float = 0.32) {
-        let scale = sampleRate / 44_100
+    /// `spaceScale` stretches every delay line: 1.0 = classic Freeverb room,
+    /// ~1.6 = hall/cathedral dimensions. `predelaySeconds` adds the distance.
+    public init(
+        sampleRate: Double,
+        roomSize: Float = 0.84,
+        damping: Float = 0.45,
+        mix: Float = 0.32,
+        spaceScale: Double = 1.0,
+        predelaySeconds: Double = 0
+    ) {
+        let scale = (sampleRate / 44_100) * max(0.25, spaceScale)
         roomSizeValue = Self.clamp01(roomSize)
         dampingValue = Self.clamp01(damping)
         mixValue = Self.clamp01(mix)
+        let predelayFrames = max(1, Int(predelaySeconds * sampleRate))
+        predelayLeft = Array(repeating: 0, count: predelayFrames)
+        predelayRight = Array(repeating: 0, count: predelayFrames)
         leftCombs = Self.combTunings.map { CombFilter(delay: Self.scaledDelay($0, scale: scale)) }
         rightCombs = Self.combTunings.map {
             CombFilter(delay: Self.scaledDelay($0 + Self.stereoSpread, scale: scale))
@@ -45,6 +63,11 @@ public final class PlateReverb: @unchecked Sendable {
     }
 
     public func reset() {
+        for index in 0..<predelayLeft.count {
+            predelayLeft[index] = 0
+            predelayRight[index] = 0
+        }
+        predelayIndex = 0
         for comb in leftCombs {
             comb.reset()
         }
@@ -71,12 +94,20 @@ public final class PlateReverb: @unchecked Sendable {
     }
 
     public func processWetSample(left: Float, right: Float) -> (Float, Float) {
+        // Pre-delay the wet input (dry path is untouched by design).
+        let delayedLeft = predelayLeft[predelayIndex]
+        let delayedRight = predelayRight[predelayIndex]
+        predelayLeft[predelayIndex] = left
+        predelayRight[predelayIndex] = right
+        predelayIndex += 1
+        if predelayIndex == predelayLeft.count { predelayIndex = 0 }
+
         let feedback = 0.7 + 0.28 * roomSizeValue
         let damp = dampingValue
         var wetLeft: Float = 0
         var wetRight: Float = 0
-        let inputLeft = left * Self.inputGain
-        let inputRight = right * Self.inputGain
+        let inputLeft = delayedLeft * Self.inputGain
+        let inputRight = delayedRight * Self.inputGain
 
         for comb in leftCombs {
             wetLeft += comb.process(inputLeft, feedback: feedback, damping: damp)

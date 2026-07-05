@@ -50,11 +50,15 @@ public final class SlowedProcessor: @unchecked Sendable {
         gateAttackCoef = Float(exp(-1 / (0.06 * sampleRate)))
         gateReleaseCoef = Float(exp(-1 / (0.35 * sampleRate)))
         resampler = VarispeedResampler(sampleRate: sampleRate, rate: parameters.rate)
+        // Cathedral dimensions: stretched delay network + ~45ms pre-delay.
+        // The slowed+reverb aesthetic is a huge distant space, not a plate.
         reverb = PlateReverb(
             sampleRate: sampleRate,
             roomSize: parameters.roomSize,
             damping: parameters.damping,
-            mix: parameters.reverbMix
+            mix: parameters.reverbMix,
+            spaceScale: 1.6,
+            predelaySeconds: 0.045
         )
     }
 

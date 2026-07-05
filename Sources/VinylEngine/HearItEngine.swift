@@ -526,6 +526,7 @@ public final class HearItEngine: @unchecked Sendable {
 
         lifecycleLock.lock()
         let isRunning = stateLock.withLock { running }
+        print("DIAG restart_pipeline reason=\(reason.rawValue) attempt=\(attempt) running=\(isRunning)")
         guard isRunning else {
             lifecycleLock.unlock()
             return
@@ -546,6 +547,7 @@ public final class HearItEngine: @unchecked Sendable {
                 print("pipeline_restarted reason=\(reason.rawValue)")
             }
         } catch {
+            print("DIAG restart_failed reason=\(reason.rawValue) attempt=\(attempt) error=\(error)")
             tearDownPipelineForRestart()
             lifecycleLock.unlock()
             clearEngineConfigurationRestartSuppressionSoon(generation: suppressionGeneration)
@@ -579,9 +581,7 @@ public final class HearItEngine: @unchecked Sendable {
 
     private func scheduleRestartRetry(reason: PipelineRestartReason, attempt: Int, error: Error) {
         guard attempt < 5 else {
-            if debugLogging {
-                print("pipeline_restart_gave_up reason=\(reason.rawValue) error=\(error.localizedDescription)")
-            }
+            print("DIAG restart_gave_up reason=\(reason.rawValue) error=\(error.localizedDescription)")
             return
         }
 
@@ -601,10 +601,29 @@ public final class HearItEngine: @unchecked Sendable {
             return currentTap
         }
 
-        tapToStop?.stop()
+        if let tapToStop {
+            stopTapWithTimeout(tapToStop)
+        }
         stopPlayback()
         resetDSPState()
         resetPool()
+    }
+
+    /// AudioDeviceStop can wedge inside coreaudiod when a tapped process died
+    /// abruptly (observed: helper killed -9 → tap teardown hangs forever →
+    /// every queued restart starves behind it and the engine looks dead).
+    /// Bound the stop: give it 2s off-queue, then abandon the wedged teardown
+    /// (the closure keeps the tap alive; coreaudiod finishes or leaks one
+    /// aggregate) and let the pipeline rebuild proceed.
+    private func stopTapWithTimeout(_ tapToStop: SystemAudioTap, seconds: Double = 2) {
+        let done = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .userInitiated).async {
+            tapToStop.stop()
+            done.signal()
+        }
+        if done.wait(timeout: .now() + seconds) == .timedOut {
+            print("DIAG tap_stop_timeout — abandoning wedged tap teardown, rebuilding anyway")
+        }
     }
 
     /// Peak of the newest captured input bins (0 = the tap is delivering

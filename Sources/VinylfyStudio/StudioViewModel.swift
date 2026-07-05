@@ -201,6 +201,13 @@ final class StudioViewModel {
     /// genuinely silent passage can't restart-loop the engine.
     private var silenceWatchdog: Task<Void, Never>?
     private var lastWatchdogRestart = Date.distantPast
+    private var watchdogRestartsWithoutRecovery = 0
+
+    /// True when the watchdog has restarted repeatedly and the chain is STILL
+    /// starved — the one failure that must never again be silent. The UI
+    /// surfaces it; any successful capture clears it.
+    private(set) var captureFault = false
+    var captureFaultHandler: ((Bool) -> Void)?
 
     private func startSilenceWatchdog() {
         silenceWatchdog?.cancel()
@@ -215,19 +222,35 @@ final class StudioViewModel {
                     silentTicks += 1
                 } else {
                     silentTicks = 0
+                    if !silent {
+                        self.watchdogRestartsWithoutRecovery = 0
+                        self.setCaptureFault(false)
+                    }
                 }
                 if silentTicks >= 2, Date.now.timeIntervalSince(self.lastWatchdogRestart) > 6 {
                     self.lastWatchdogRestart = .now
                     silentTicks = 0
+                    self.watchdogRestartsWithoutRecovery += 1
                     self.engine.restartForSilenceRecovery()
+                    if self.watchdogRestartsWithoutRecovery >= 3 {
+                        self.setCaptureFault(true)
+                    }
                 }
             }
         }
     }
 
+    private func setCaptureFault(_ fault: Bool) {
+        guard captureFault != fault else { return }
+        captureFault = fault
+        captureFaultHandler?(fault)
+    }
+
     private func stopSilenceWatchdog() {
         silenceWatchdog?.cancel()
         silenceWatchdog = nil
+        watchdogRestartsWithoutRecovery = 0
+        setCaptureFault(false)
     }
 
     /// Entry point for helper-pushed snapshots. The seek/play gates still
@@ -297,12 +320,13 @@ final class StudioViewModel {
             p.crackleIntensity = n == 0 ? 0 : 0.4 + 1.2 * n
             parameters = p
         case .slowed:
-            // NOISE knob = reverb depth in slowed mode. Floor of 0.2 so the
-            // wash never fully disappears; big bright room for the wide tail.
+            // NOISE knob = reverb depth in slowed mode. Floor of 0.25 so the
+            // wash never fully disappears; cathedral-sized room, mild damping
+            // (big stone spaces are dark, not bright).
             var p = engine.slowedParameters
-            p.reverbMix = Float(0.2 + 0.55 * noise.clamped01)
-            p.roomSize = 0.90
-            p.damping = 0.32
+            p.reverbMix = Float(0.25 + 0.55 * noise.clamped01)
+            p.roomSize = 0.96
+            p.damping = 0.42
             engine.slowedParameters = p
         }
     }
@@ -317,10 +341,10 @@ final class StudioViewModel {
             p.stereoWidth = 1 - 0.3 * m
             parameters = p
         case .slowed:
-            // MAIN knob = tape speed in slowed mode: 0.97x (subtle) down to
-            // 0.83x (syrup). Default 0.6 lands near the sweet-spot ~0.89x.
+            // MAIN knob = tape speed in slowed mode: 0.93x (subtle) down to
+            // 0.78x (deep syrup). Default 0.6 lands on the classic ~0.84x.
             var p = engine.slowedParameters
-            p.rate = 0.97 - 0.14 * main.clamped01
+            p.rate = 0.93 - 0.15 * main.clamped01
             engine.slowedParameters = p
         }
     }

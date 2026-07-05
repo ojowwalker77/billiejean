@@ -40,6 +40,12 @@ final class MainViewModel {
         standalone.commandFailureHandler = { [weak self] label in
             self?.showToast(symbol: "exclamationmark.triangle", message: "Player command failed (\(label))")
         }
+        studio.captureFaultHandler = { [weak self] fault in
+            if fault {
+                self?.showToast(symbol: "waveform.slash",
+                                message: "Effect chain isn't receiving audio — capture fault")
+            }
+        }
         standalone.connectionHandler = { [weak self] connected in
             guard let self else { return }
             self.studio.activateStandalone(connected, helperBundleID: StandalonePlayer.helperBundleID)
