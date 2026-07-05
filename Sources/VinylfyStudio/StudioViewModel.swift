@@ -181,13 +181,53 @@ final class StudioViewModel {
         standaloneActive = active
         if active {
             nowPlaying.stop()
-            engine.tapTarget = .bundle(helperBundleID)
+            engine.tapTarget = .bundleWithMediaServices(helperBundleID)
+            startSilenceWatchdog()
         } else {
+            stopSilenceWatchdog()
             engine.tapTarget = .bundle(
                 UserDefaults.standard.string(forKey: "vinylfy.tapTargetOverride") ?? "com.apple.Music"
             )
             nowPlaying.start()
         }
+    }
+
+    // MARK: - Silence watchdog (tap stream-set recovery)
+
+    /// CoreAudio taps bind the target's streams at creation; MusicKit starting
+    /// a NEW stream in the already-tapped helper is invisible to the tap.
+    /// Symptom: source says playing, input meters flatline. Cure: rebuild the
+    /// pipeline so the tap rebinds against the live streams. Rate-limited so a
+    /// genuinely silent passage can't restart-loop the engine.
+    private var silenceWatchdog: Task<Void, Never>?
+    private var lastWatchdogRestart = Date.distantPast
+
+    private func startSilenceWatchdog() {
+        silenceWatchdog?.cancel()
+        silenceWatchdog = Task { [weak self] in
+            var silentTicks = 0
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard let self, self.standaloneActive else { return }
+                let playing = (self.snapshot?.isPlaying ?? false) && !self.userHeldOutput
+                let silent = self.engine.recentInputPeak() < 1e-5
+                if playing && silent && self.isRunning {
+                    silentTicks += 1
+                } else {
+                    silentTicks = 0
+                }
+                if silentTicks >= 2, Date.now.timeIntervalSince(self.lastWatchdogRestart) > 6 {
+                    self.lastWatchdogRestart = .now
+                    silentTicks = 0
+                    self.engine.restartForSilenceRecovery()
+                }
+            }
+        }
+    }
+
+    private func stopSilenceWatchdog() {
+        silenceWatchdog?.cancel()
+        silenceWatchdog = nil
     }
 
     /// Entry point for helper-pushed snapshots. The seek/play gates still

@@ -11,6 +11,10 @@ public final class HearItEngine: @unchecked Sendable {
     public enum TapTarget: Sendable, Equatable {
         case systemWide
         case bundle(String)
+        /// Bundle plus MediaPlayer's RemotePlayerService XPC instances:
+        /// MusicKit playback renders THERE, not in the host process — a tap on
+        /// the host alone captures only its own (keepalive) silence.
+        case bundleWithMediaServices(String)
     }
 
     public struct Meters: Sendable {
@@ -270,6 +274,15 @@ public final class HearItEngine: @unchecked Sendable {
     /// Pipeline diagnostics (visible via `log show`); throttled per ~5s.
     private let diagLog = Logger(subsystem: "com.vinylfy.app", category: "engine")
     private var diagBufferCount = 0
+
+    private static func diagPeak(_ buffer: AVAudioPCMBuffer) -> Float {
+        guard let data = buffer.floatChannelData, buffer.frameLength > 0 else { return 0 }
+        var peak: Float = 0
+        for frame in 0..<Int(buffer.frameLength) {
+            peak = max(peak, abs(data[0][frame]))
+        }
+        return (peak * 1000).rounded() / 1000
+    }
 
     public init(debugLogging: Bool = false) {
         self.debugLogging = debugLogging
@@ -594,6 +607,24 @@ public final class HearItEngine: @unchecked Sendable {
         resetPool()
     }
 
+    /// Peak of the newest captured input bins (0 = the tap is delivering
+    /// silence). Watchdog surface: a source that claims to play while this
+    /// stays 0 means the tap is bound to a stale stream set.
+    public func recentInputPeak(maxBins: Int = 8) -> Float {
+        meterLock.lock()
+        defer { meterLock.unlock() }
+        return inputMeterRing.newest(maxBins: maxBins).max() ?? 0
+    }
+
+    /// CoreAudio process taps bind the stream set present at creation; a
+    /// stream that appears later (MusicKit starting in an already-tapped
+    /// helper) is never captured. Rebuilding the pipeline rebinds the tap
+    /// against the live streams.
+    public func restartForSilenceRecovery() {
+        print("DIAG silence_watchdog_restart")
+        schedulePipelineRestart(reason: .targetApp)
+    }
+
     public func meters(maxBins: Int) -> Meters {
         meterLock.lock()
         defer { meterLock.unlock() }
@@ -676,6 +707,24 @@ public final class HearItEngine: @unchecked Sendable {
 
         case .bundle(let bundleIdentifier):
             let processObjectIDs = Self.processObjectIDs(forBundleIdentifier: bundleIdentifier)
+            guard !processObjectIDs.isEmpty else {
+                stateLock.withLock {
+                    excludingCurrentProcess = false
+                }
+                throw AudioError.targetProcessNotFound(bundleIdentifier)
+            }
+            stateLock.withLock {
+                excludingCurrentProcess = false
+            }
+            return .processes(processObjectIDs)
+
+        case .bundleWithMediaServices(let bundleIdentifier):
+            var processObjectIDs = Self.processObjectIDs(forBundleIdentifier: bundleIdentifier)
+            let mediaServices = SystemAudioTap.processObjectIDs(
+                matchingBundleSubstring: "RemotePlayerService"
+            )
+            processObjectIDs.append(contentsOf: mediaServices.filter { !processObjectIDs.contains($0) })
+            print("DIAG tap_resolve host+media objects=\(processObjectIDs)")
             guard !processObjectIDs.isEmpty else {
                 stateLock.withLock {
                     excludingCurrentProcess = false
@@ -851,8 +900,11 @@ public final class HearItEngine: @unchecked Sendable {
 
         diagBufferCount += 1
         if diagBufferCount % 500 == 1 {
-            diagLog.log("process mode=\(mode.rawValue, privacy: .public) rate=\(rate, format: .fixed(precision: 2)) in=\(buffer.frameLength) out=\(processed?.frameLength ?? 0) bypass=\(self.currentBypass)")
-            print("DIAG process mode=\(mode.rawValue) rate=\(rate) in=\(buffer.frameLength) out=\(processed?.frameLength ?? 0) bypass=\(currentBypass)")
+            let inPeak = Self.diagPeak(buffer)
+            let outPeak = processed.map(Self.diagPeak) ?? 0
+            let holding = stateLock.withLock { flowHolding }
+            let outPausedNow = stateLock.withLock { outputPausedFlag }
+            print("DIAG process mode=\(mode.rawValue) rate=\(rate) in=\(buffer.frameLength) out=\(processed?.frameLength ?? 0) inPeak=\(inPeak) outPeak=\(outPeak) bypass=\(currentBypass) flowHold=\(holding) outPaused=\(outPausedNow)")
         }
 
         if didChangeFormat, debugLogging {

@@ -168,6 +168,41 @@ public final class SystemAudioTap: @unchecked Sendable {
         processObjectIDs(forPID: getpid())
     }
 
+    /// All CoreAudio process objects whose bundle id contains `substring`.
+    /// Needed for out-of-process renderers: MusicKit's ApplicationMusicPlayer
+    /// renders in MediaPlayer's RemotePlayerService XPC — the host process
+    /// itself never owns the audio.
+    public static func processObjectIDs(matchingBundleSubstring substring: String) -> [AudioObjectID] {
+        var listAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyProcessObjectList,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(
+            AudioObjectID(kAudioObjectSystemObject), &listAddress, 0, nil, &size
+        ) == noErr, size > 0 else { return [] }
+
+        var objects = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
+        guard AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &listAddress, 0, nil, &size, &objects
+        ) == noErr else { return [] }
+
+        var bundleAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioProcessPropertyBundleID,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        return objects.filter { object in
+            guard object != kAudioObjectUnknown else { return false }
+            var bundle: Unmanaged<CFString>?
+            var bundleSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+            guard AudioObjectGetPropertyData(object, &bundleAddress, 0, nil, &bundleSize, &bundle) == noErr,
+                  let value = bundle?.takeRetainedValue() else { return false }
+            return (value as String).localizedCaseInsensitiveContains(substring)
+        }
+    }
+
     public static func processObjectIDs(forPID pid: pid_t) -> [AudioObjectID] {
         var pid = pid
         var processObjectID = AudioObjectID(kAudioObjectUnknown)

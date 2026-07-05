@@ -59,7 +59,9 @@ private final class PlayerHelperAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.accessory)
-        keepalive.start()
+        if ProcessInfo.processInfo.environment["BILLIEJEAN_NO_KEEPALIVE"] == nil {
+            keepalive.start()
+        }
         startupTask = Task { [weak self] in
             await self?.start()
         }
