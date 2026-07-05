@@ -18,6 +18,9 @@ final class AppWindow: NSPanel {
             defer: false
         )
         isFloatingPanel = false
+        // NSPanel hides itself when the app deactivates by default — a document
+        // window must survive clicks into other apps.
+        hidesOnDeactivate = false
         level = .normal
         titleVisibility = .hidden
         titlebarAppearsTransparent = true
