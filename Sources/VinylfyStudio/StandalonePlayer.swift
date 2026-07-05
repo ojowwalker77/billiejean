@@ -172,8 +172,9 @@ final class StandalonePlayer {
             if let url = t.artworkURL { trackArtworkURLs[t.id] = url }
         }
         return result.tracks.map {
+            // Bridge indices are 0-based; MusicTrack.index is 1-based.
             MusicTrack(id: $0.id, name: $0.title, artist: $0.artist,
-                       durationSeconds: $0.durationSeconds, index: $0.index)
+                       durationSeconds: $0.durationSeconds, index: $0.index + 1)
         }
     }
 
@@ -214,8 +215,10 @@ final class StandalonePlayer {
             if let url = t.artworkURL { trackArtworkURLs[t.id] = url }
         }
         return result.tracks.map {
+            // Bridge indices are 0-based; MusicTrack.index is 1-based
+            // (AppleScript convention the whole UI assumes).
             MusicTrack(id: $0.id, name: $0.title, artist: $0.artist,
-                       durationSeconds: $0.durationSeconds, index: $0.index)
+                       durationSeconds: $0.durationSeconds, index: $0.index + 1)
         }
     }
 
