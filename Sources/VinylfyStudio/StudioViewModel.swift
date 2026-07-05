@@ -321,11 +321,11 @@ final class StudioViewModel {
             p.crackleIntensity = n == 0 ? 0 : 0.4 + 1.2 * n
             parameters = p
         case .slowed:
-            // NOISE knob = reverb depth in slowed mode. Floor of 0.25 so the
-            // wash never fully disappears; cathedral-sized room, mild damping
-            // (big stone spaces are dark, not bright).
+            // NOISE knob = reverb depth in slowed mode. Cathedral character
+            // comes from the space/pre-delay; the LEVEL stays behind the dry
+            // signal (default ~0.35 equal-power, was drowning at ~0.53).
             var p = engine.slowedParameters
-            p.reverbMix = Float(0.25 + 0.55 * noise.clamped01)
+            p.reverbMix = Float(0.12 + 0.45 * noise.clamped01)
             p.roomSize = 0.96
             p.damping = 0.42
             engine.slowedParameters = p
